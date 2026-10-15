@@ -1,0 +1,3 @@
+# cmd.exe плохо переваривает .bat с LF-переводами строк (ломаются метки и goto)
+*.bat text eol=crlf
+*.sh text eol=lf

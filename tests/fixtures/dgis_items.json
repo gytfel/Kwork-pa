@@ -1,0 +1,53 @@
+{
+  "meta": {"api_version": "3.0.0", "code": 200, "issue_date": "20261015"},
+  "result": {
+    "total": 3,
+    "items": [
+      {
+        "id": "70000001012345678_abcdef",
+        "name": "Автосервис Мотор",
+        "type": "branch",
+        "address_name": "Проспект Победы, 12",
+        "rubrics": [{"id": "405", "name": "Автосервисы", "kind": "primary"}],
+        "org": {"id": "70000001012345677", "name": "Мотор", "branch_count": 1},
+        "reviews": {"general_rating": 4.6, "general_review_count": 48},
+        "contact_groups": [
+          {"contacts": [
+            {"type": "phone", "value": "+78432000001", "text": "+7 (843) 200-00-01"},
+            {"type": "vkontakte", "value": "http://link.2gis.ru/vk", "url": "https://vk.com/motor_kzn", "text": "vk.com/motor_kzn"}
+          ]}
+        ]
+      },
+      {
+        "id": "70000001087654321_qwerty",
+        "name": "Салон красоты Лилия",
+        "type": "branch",
+        "address_name": "ул. Баумана, 5",
+        "rubrics": [{"id": "652", "name": "Салоны красоты"}],
+        "org": {"branch_count": 2},
+        "reviews": {"general_rating": 3.7, "general_review_count": 25},
+        "contact_groups": [
+          {"contacts": [
+            {"type": "phone", "value": "+78432000002", "text": "+7 (843) 200-00-02"},
+            {"type": "email", "value": "lilia@example.ru"},
+            {"type": "website", "value": "http://link.2gis.ru/1.2/AAA", "text": "lilia-salon.ru"}
+          ]}
+        ]
+      },
+      {
+        "id": "70000001011111111",
+        "name": "Пятёрочка",
+        "type": "branch",
+        "address_name": "ул. Пушкина, 1",
+        "rubrics": [{"name": "Супермаркеты"}],
+        "org": {"branch_count": 18000},
+        "contact_groups": [
+          {"contacts": [
+            {"type": "phone", "value": "+78005555505"},
+            {"type": "website", "value": "http://link.2gis.ru/x", "text": "5ka.ru"}
+          ]}
+        ]
+      }
+    ]
+  }
+}
