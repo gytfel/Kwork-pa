@@ -48,17 +48,20 @@ def projects_markdown(projects: Iterable[Project]) -> str:
         if p.verdict:
             lines.append(f"\n*{p.verdict.reason}*")
         if p.llm:
-            lines.append(
-                f"\n**Claude:** {'берёмся' if p.llm.get('can_do') else 'не берёмся'} "
-                f"(уверенность {p.llm.get('confidence')}, объём {p.llm.get('size')}). "
-                f"{p.llm.get('summary', '')}"
-            )
+            by_ai = p.llm.get("source") != "templates"
+            if by_ai:
+                lines.append(
+                    f"\n**Claude:** {'берёмся' if p.llm.get('can_do') else 'не берёмся'} "
+                    f"(уверенность {p.llm.get('confidence')}, объём {p.llm.get('size')}). "
+                    f"{p.llm.get('summary', '')}"
+                )
             if p.llm.get("human_steps"):
                 lines.append(f"\n**Остаётся человеку:** {p.llm['human_steps']}")
             if p.llm.get("risks"):
                 lines.append(f"\n**Риски:** {p.llm['risks']}")
             if p.llm.get("draft_reply"):
-                lines.append("\n**Черновик отклика:**\n\n> " + p.llm["draft_reply"].replace("\n", "\n> "))
+                label = "Черновик отклика" if by_ai else "Черновик отклика (шаблон — допишите под заказ)"
+                lines.append(f"\n**{label}:**\n\n> " + p.llm["draft_reply"].replace("\n", "\n> "))
         if p.description:
             desc = p.description if len(p.description) <= 800 else p.description[:800] + "…"
             lines.append("\n" + desc)

@@ -38,7 +38,7 @@ def test_assess_project_parses_structured_output():
     client, messages = _fake_client(json.dumps(answer, ensure_ascii=False))
     judge = ClaudeJudge(model="claude-opus-5-5", client=client)
     result = judge.assess_project(Project(id=1, title="Парсер", description="Собрать цены", price=5000))
-    assert result == answer
+    assert result == {**answer, "source": "api"}
     request = messages.requests[0]
     assert request["model"] == "claude-opus-5-5"
     assert request["output_config"]["format"]["type"] == "json_schema"
@@ -168,7 +168,8 @@ def test_telegram_transient_failure_retries_delivery_only(tmp_path, capsys, monk
     token = "123456:SECRET TOKEN"  # пробел попадёт в URL как %20 — маска всё равно должна сработать
     sent, attempts = [], {"n": 0}
 
-    def flaky_send(tok, chat, text, session=None):
+    def flaky_send(tok, chat, text, session=None, reply_markup=None):
+        assert reply_markup["inline_keyboard"][0][0]["url"].startswith("https://kwork.ru/projects/")
         attempts["n"] += 1
         if attempts["n"] == 1:
             raise requests.ConnectionError("Max retries exceeded with url: /bot123456:SECRET%20TOKEN/sendMessage")
@@ -194,7 +195,7 @@ def test_telegram_permanent_failure_disables_notifications(tmp_path, capsys, mon
 
     attempts = {"n": 0}
 
-    def forbidden(tok, chat, text, session=None):
+    def forbidden(tok, chat, text, session=None, reply_markup=None):
         attempts["n"] += 1
         response = requests.Response()
         response.status_code = 403
@@ -227,3 +228,32 @@ def test_load_dotenv_strips_inline_comments_and_quotes(tmp_path, monkeypatch):
     load_dotenv(env)
     import os
     assert [os.environ[k] for k in "ABCDE"] == ["value", "quoted # not a comment", "x", "no#comment", "e"]
+
+
+def test_cli_drafts_with_templates_mode(tmp_path, capsys):
+    out = tmp_path / "r"
+    assert main(["kwork", "--from-file", str(FIXTURES / "kwork_projects.json"), "--drafts", "--ai", "templates",
+                 "--out", str(out), "--format", "md,json"]) == 0
+    assert "шаблоны (без ИИ)" in capsys.readouterr().err
+    md = out.with_suffix(".md").read_text("utf-8")
+    assert "Черновик отклика (шаблон — допишите под заказ)" in md and "**Claude:**" not in md
+    assert json.loads(out.with_suffix(".json").read_text("utf-8"))[0]["claude_source"] == "templates"
+
+
+def test_cli_llm_flag_still_works(tmp_path):
+    assert main(["kwork", "--from-file", str(FIXTURES / "kwork_projects.json"), "--llm", "--ai", "templates",
+                 "--out", str(tmp_path / "r"), "--format", "json"]) == 0
+
+
+def test_cli_missing_claude_code_falls_back_to_templates(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr("kwork_pa.ai.find_claude_cli", lambda: None)
+    assert main(["kwork", "--from-file", str(FIXTURES / "kwork_projects.json"), "--drafts", "--ai", "claude-code",
+                 "--out", str(tmp_path / "r"), "--format", "json"]) == 0
+    err = capsys.readouterr().err
+    assert "Claude Code не найден" in err and "по шаблонам" in err
+
+
+def test_cli_bot_requires_token(monkeypatch, capsys):
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    assert main(["bot"]) == 2
+    assert "@BotFather" in capsys.readouterr().err

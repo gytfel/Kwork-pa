@@ -23,7 +23,8 @@ def answers(monkeypatch):
 
 @pytest.fixture
 def clean_env(monkeypatch, tmp_path):
-    for key in ("ANTHROPIC_API_KEY", "DGIS_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "KWORK_PA_PROG"):
+    for key in ("ANTHROPIC_API_KEY", "DGIS_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "KWORK_PA_PROG",
+                "KWORK_PA_AI"):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.chdir(tmp_path)
     return tmp_path
@@ -41,30 +42,65 @@ def run_menu():
 
 
 def test_kwork_defaults(answers, clean_env):
-    answers("1", "", "", "", "0")
+    answers("1", "", "", "", "", "0")
     assert run_menu() == [["kwork", "--pages", "3"]]
 
 
-def test_kwork_with_filters_and_claude(answers, clean_env, monkeypatch):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+def test_kwork_with_filters_and_drafts(answers, clean_env):
     answers("1", "парсер", "3000", "2", "д", "0")
-    assert run_menu() == [["kwork", "--keyword", "парсер", "--min-price", "3000", "--pages", "2", "--llm"]]
+    assert run_menu() == [["kwork", "--keyword", "парсер", "--min-price", "3000", "--pages", "2", "--drafts"]]
 
 
-def test_claude_question_skipped_without_key(answers, clean_env):
-    answers("1", "", "abc", "500", "", "0")  # «abc» — неверное число, спрашивает ещё раз
+@pytest.mark.parametrize("env,expected", [
+    ({"ANTHROPIC_API_KEY": "sk-test"}, "Claude API"),
+    ({"KWORK_PA_AI": "templates"}, "шаблоны"),
+])
+def test_drafts_question_names_the_source(answers, clean_env, monkeypatch, capsys, env, expected):
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    prompts = []
+
+    def fake_input(prompt=""):
+        prompts.append(prompt)
+        return {0: "1"}.get(len(prompts) - 1, "") if len(prompts) < 6 else "0"
+
+    monkeypatch.setattr(builtins, "input", fake_input)
+    run_menu()
+    assert any("черновики откликов" in p and expected in p for p in prompts)
+
+
+def test_invalid_number_is_asked_again(answers, clean_env):
+    answers("1", "", "abc", "500", "", "", "0")  # «abc» — неверное число, спрашивает ещё раз
     assert run_menu() == [["kwork", "--min-price", "500", "--pages", "3"]]
 
 
 def test_watch_with_telegram(answers, clean_env, monkeypatch):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "t")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "c")
-    answers("2", "", "", "", "10", "", "0")
+    answers("2", "", "", "", "", "10", "", "0")
     assert run_menu() == [["kwork", "--pages", "1", "--watch", "600", "--telegram"]]
 
 
+def test_bot_asks_for_token_and_saves_it(answers, clean_env):
+    answers("5", "123456789:AAH4kExampleTokenValue_abc-XYZ", "", "0")
+    assert run_menu() == [["bot"]]
+    assert (clean_env / ".env").read_text(encoding="utf-8") == "TELEGRAM_BOT_TOKEN=123456789:AAH4kExampleTokenValue_abc-XYZ\n"
+
+
+def test_bot_rejects_something_that_is_not_a_token(answers, clean_env):
+    answers("5", "my bot", "0")
+    assert run_menu() == []
+    assert not (clean_env / ".env").exists()
+
+
+def test_bot_with_token_starts_right_away(answers, clean_env, monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:abc")
+    answers("5", "0")
+    assert run_menu() == [["bot"]]
+
+
 def test_leads_asks_and_saves_key(answers, clean_env, monkeypatch):
-    answers("3", "my-key", "", "Казань", "кафе, барбершоп", "", "0")
+    answers("3", "my-key", "", "Казань", "кафе, барбершоп", "", "", "0")
     assert run_menu() == [[
         "leads", "--city", "Казань", "--query", "кафе", "--query", "барбершоп", "--audit",
     ]]

@@ -69,6 +69,10 @@ CAN_DO: tuple[Rule, ...] = (
         r"google[- ]таблиц\w*", r"формул\w*", r"макрос\w*", r"vba", r"apps ?script",
         r"таблиц\w*",
     )),
+    # «Переводы» раньше «Текстов»: при равном весе шаблон отклика берётся у более узкого навыка
+    Rule("translation", "Переводы", 3, (
+        r"перев[оеё]д\w*", r"перевести", r"translat\w*", r"локализ\w*",
+    )),
     Rule("texts", "Тексты и копирайтинг", 3, (
         r"текст(?!иль)\w*", r"стать(?:я|и|ю|ей|ям|ями)\b", r"копирайт\w*", r"рерайт\w*",
         r"описани\w*", r"контент\w*", r"посты?\b", r"постов\b", r"сценари\w*",
@@ -76,9 +80,6 @@ CAN_DO: tuple[Rule, ...] = (
     )),
     Rule("seo_texts", "SEO-тексты и мета-теги", 2, (
         r"seo", r"сео\b", r"мета-?тег\w*", r"семантическ\w* ядр\w*", r"ключев\w* слов\w*",
-    )),
-    Rule("translation", "Переводы", 3, (
-        r"перев[оеё]д\w*", r"перевести", r"translat\w*", r"локализ\w*",
     )),
     Rule("documents", "Документы, резюме, презентации", 2, (
         r"резюме", r"презентац\w*", r"коммерческ\w* предложени\w*", r"бизнес-?план\w*",
@@ -194,6 +195,7 @@ class Verdict:
     skills: list[str] = field(default_factory=list)
     blockers: list[str] = field(default_factory=list)
     forbidden: list[str] = field(default_factory=list)
+    skill_keys: list[str] = field(default_factory=list)  # ключи правил CAN_DO, от самого весомого
 
     @property
     def reason(self) -> str:
@@ -224,10 +226,13 @@ def classify(title: str, description: str = "", min_score: int = DEFAULT_MIN_SCO
 
     positive = 0
     skills = []
+    weighted: list[tuple[int, str]] = []
     for rule in CAN_DO:
         if _matches(rule, text):
-            positive += rule.weight + (1 if _matches(rule, title) else 0)
+            weight = rule.weight + (1 if _matches(rule, title) else 0)
+            positive += weight
             skills.append(rule.label)
+            weighted.append((weight, rule.key))
 
     negative = 0
     blockers = []
@@ -238,4 +243,5 @@ def classify(title: str, description: str = "", min_score: int = DEFAULT_MIN_SCO
 
     score = positive - negative
     ok = not forbidden and positive > 0 and score >= min_score
-    return Verdict(ok=ok, score=score, skills=skills, blockers=blockers, forbidden=forbidden)
+    skill_keys = [key for _, key in sorted(weighted, key=lambda item: -item[0])]
+    return Verdict(ok=ok, score=score, skills=skills, blockers=blockers, forbidden=forbidden, skill_keys=skill_keys)

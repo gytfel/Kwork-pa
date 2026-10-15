@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import re
 import sys
@@ -12,8 +11,10 @@ from pathlib import Path
 import requests
 
 from . import report
+from .ai import MODES
 from .capability import DEFAULT_MIN_SCORE, classify
 from .kwork import KworkClient, KworkError, Project, load_projects_file
+from .seen import SeenStore
 
 DEFAULT_NICHES = (
     "автосервис", "салон красоты", "барбершоп", "стоматология", "ремонт телефонов",
@@ -103,20 +104,31 @@ def _select(projects: list[Project], args: argparse.Namespace) -> list[Project]:
     return selected
 
 
-def _assess_with_claude(projects: list[Project], limit: int) -> list[Project]:
-    from .llm import ClaudeJudge  # anthropic нужен только для этого режима
+def _make_judge(mode: str | None):
+    from .llm import AIError, ClaudeJudge
 
-    import anthropic
+    try:
+        judge = ClaudeJudge(mode=mode)
+    except AIError as exc:
+        print(f"{exc}\nЧерновики будут по шаблонам.", file=sys.stderr)
+        judge = ClaudeJudge(mode="templates")
+    print(f"Черновики и проверка: {judge.description}", file=sys.stderr)
+    return judge
 
-    judge = ClaudeJudge()
+
+def _assess(projects: list[Project], limit: int, mode: str | None) -> list[Project]:
+    from .llm import AIError
+
+    judge = _make_judge(mode)
     kept = []
     for i, project in enumerate(projects):
         if i < limit and project.verdict and project.verdict.ok:
-            print(f"  Claude проверяет: {project.title[:70]}", file=sys.stderr)
+            if judge.uses_ai:
+                print(f"  Claude проверяет: {project.title[:70]}", file=sys.stderr)
             try:
                 project.llm = judge.assess_project(project)
-            except anthropic.APIError as exc:
-                print(f"  Claude API: {exc}", file=sys.stderr)
+            except AIError as exc:
+                print(f"  {exc}", file=sys.stderr)
             if project.llm is not None and not project.llm.get("can_do"):
                 continue
         kept.append(project)
@@ -134,7 +146,7 @@ def _print_project(project: Project) -> None:
     print(f"      {project.url}")
     if v:
         print(f"      {v.reason}")
-    if project.llm:
+    if project.llm and project.llm.get("source") != "templates":
         print(f"      Claude: {project.llm.get('summary', '')}")
 
 
@@ -144,11 +156,11 @@ def _mask_telegram(text: str) -> str:
 
 def _deliver(telegram: tuple[str, str], queue: list[Project]) -> tuple[list[Project], bool]:
     """Шлёт заказы в Telegram. Возвращает (недоставленные, ошибка не временная)."""
-    from .notify import format_project, send_telegram
+    from .notify import format_project, project_keyboard, send_telegram
 
     for i, project in enumerate(queue):
         try:
-            send_telegram(*telegram, format_project(project))
+            send_telegram(*telegram, format_project(project), reply_markup=project_keyboard(project))
         except requests.RequestException as exc:
             print(f"Telegram: не удалось отправить ({_mask_telegram(str(exc))})", file=sys.stderr)
             status = exc.response.status_code if exc.response is not None else None
@@ -161,32 +173,6 @@ def _deliver(telegram: tuple[str, str], queue: list[Project]) -> tuple[list[Proj
                 return [], True
             return queue[i:], False
     return [], False
-
-
-class SeenStore:
-    """ID уже показанных проектов — для режима --watch."""
-
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        try:
-            self.ids: list[int] = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            self.ids = []
-        self._set = set(self.ids)
-
-    def __contains__(self, project_id: int) -> bool:
-        return project_id in self._set
-
-    def add(self, project_id: int) -> None:
-        if project_id not in self._set:
-            self.ids.append(project_id)
-            self._set.add(project_id)
-
-    def save(self, keep: int = 5000) -> None:
-        self.ids = self.ids[-keep:]
-        self._set = set(self.ids)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(self.ids), encoding="utf-8")
 
 
 def cmd_kwork(args: argparse.Namespace) -> int:
@@ -217,8 +203,8 @@ def cmd_kwork(args: argparse.Namespace) -> int:
         selected = _select(projects, args)
         if seen is not None:
             selected = [p for p in selected if p.id not in seen]
-        if args.llm and selected:
-            selected = _assess_with_claude(selected, args.llm_limit)
+        if args.drafts and selected:
+            selected = _assess(selected, args.drafts_limit, args.ai)
 
         ok_count = sum(1 for p in selected if p.verdict and p.verdict.ok)
         print(f"Всего проектов: {len(projects)}, подходят для Claude: {ok_count}\n")
@@ -288,17 +274,16 @@ def cmd_leads(args: argparse.Namespace) -> int:
     )
 
     if args.pitch and selected:
-        import anthropic
+        from .llm import AIError
 
-        from .llm import ClaudeJudge
-
-        judge = ClaudeJudge()
+        judge = _make_judge(args.ai)
         for lead in selected[: args.pitch_limit]:
-            print(f"  Claude пишет сообщение для: {lead.company.name}", file=sys.stderr)
+            if judge.uses_ai:
+                print(f"  Claude пишет сообщение для: {lead.company.name}", file=sys.stderr)
             try:
                 lead.pitch = judge.pitch_for_lead(lead)
-            except anthropic.APIError as exc:
-                print(f"  Claude API: {exc}", file=sys.stderr)
+            except AIError as exc:
+                print(f"  {exc}", file=sys.stderr)
 
     print(f"Компаний найдено: {len(leads)}, перспективных: {len(selected)}\n")
     for lead in selected:
@@ -313,6 +298,63 @@ def cmd_leads(args: argparse.Namespace) -> int:
     return 0
 
 
+# --- Telegram-бот --------------------------------------------------------------------
+
+def cmd_bot(args: argparse.Namespace) -> int:
+    from .bot import BotStopped, KworkBot, TelegramAPI
+
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    if not token:
+        print(
+            "Нужен токен бота. В Telegram откройте @BotFather → /newbot → придумайте имя → "
+            "скопируйте токен и добавьте в .env строку TELEGRAM_BOT_TOKEN=токен "
+            "(или запустите меню — оно спросит токен само).",
+            file=sys.stderr,
+        )
+        return 2
+
+    state_path = Path(args.state)
+    client = KworkClient(delay=args.delay, cookie=os.environ.get("KWORK_COOKIE"))
+
+    def fetch() -> list[Project]:
+        return list(client.iter_projects(["all"], pages=args.pages))
+
+    def make_judge():
+        return _make_judge(args.ai)
+
+    def remember_owner(chat_id: int) -> None:
+        if not os.environ.get("TELEGRAM_CHAT_ID"):
+            from .menu import save_to_env
+
+            try:
+                save_to_env("TELEGRAM_CHAT_ID", str(chat_id))  # пригодится и для kwork --telegram
+            except OSError:
+                pass
+
+    def make_dgis():
+        from .dgis import DgisClient
+
+        key = os.environ.get("DGIS_API_KEY", "").strip()
+        return DgisClient(key) if key else None
+
+    bot = KworkBot(
+        TelegramAPI(token),
+        state_path=state_path,
+        fetch=fetch,
+        seen=SeenStore(state_path.with_name(state_path.stem + "_seen.json")),
+        judge_factory=make_judge,
+        allowed_chat=os.environ.get("TELEGRAM_CHAT_ID") or None,
+        on_owner=remember_owner,
+        dgis_factory=make_dgis,
+    )
+    try:
+        bot.run()
+    except BotStopped as exc:
+        print(f"Ошибка: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 # --- check ---------------------------------------------------------------------------
 
 def cmd_check(args: argparse.Namespace) -> int:
@@ -322,6 +364,13 @@ def cmd_check(args: argparse.Namespace) -> int:
     print(f"{'ПОДХОДИТ' if verdict.ok else 'НЕ ПОДХОДИТ'} (балл {verdict.score})")
     print(verdict.reason)
     return 0 if verdict.ok else 1
+
+
+AI_HELP = (
+    "чем писать черновики: api — Claude API (ANTHROPIC_API_KEY), claude-code — "
+    "установленный Claude Code по подписке, без API-ключа, templates — шаблоны без ИИ; "
+    "auto (по умолчанию) — первое доступное"
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -340,8 +389,11 @@ def build_parser() -> argparse.ArgumentParser:
     k.add_argument("--max-offers", type=int, help="пропускать проекты, где откликов больше N")
     k.add_argument("--min-score", type=int, default=DEFAULT_MIN_SCORE, help="порог балла классификатора")
     k.add_argument("--show-rejected", action="store_true", help="показать и неподходящие (с причиной)")
-    k.add_argument("--llm", action="store_true", help="перепроверить через Claude API и написать черновик отклика")
-    k.add_argument("--llm-limit", type=int, default=30, help="сколько проектов максимум отправить в Claude")
+    k.add_argument("--drafts", "--llm", dest="drafts", action="store_true",
+                   help="черновики откликов (и перепроверка заказов, если доступен Claude)")
+    k.add_argument("--drafts-limit", "--llm-limit", dest="drafts_limit", type=int, default=30,
+                   help="для скольких заказов максимум")
+    k.add_argument("--ai", choices=MODES, help=AI_HELP)
     k.add_argument("--watch", type=int, metavar="СЕК", help="проверять каждые N секунд и показывать только новые")
     k.add_argument("--seen-file", default="results/.kwork_seen.json", help="где хранить ID просмотренных (--watch)")
     k.add_argument("--telegram", action="store_true", help="слать подходящие заказы в Telegram")
@@ -361,7 +413,8 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--page-size", type=int, default=10, help="компаний на странице (демо-ключ: максимум 10)")
     g.add_argument("--audit", action="store_true", help="проверять сайты компаний (HTTPS, мобильная версия, SEO)")
     g.add_argument("--min-score", type=int, default=30, help="минимальный балл лида")
-    g.add_argument("--pitch", action="store_true", help="черновики персональных сообщений через Claude API")
+    g.add_argument("--pitch", action="store_true", help="черновики персональных сообщений компаниям")
+    g.add_argument("--ai", choices=MODES, help=AI_HELP)
     g.add_argument("--pitch-limit", type=int, default=20, help="для скольких лидов писать сообщения")
     g.add_argument("--out", default="results/leads", help="путь для отчёта без расширения")
     g.add_argument("--format", type=_formats, default={"csv", "md"}, help="csv,json,md")
@@ -371,6 +424,13 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("text", nargs="*", help="первая строка — заголовок, дальше — описание (или stdin)")
     c.add_argument("--min-score", type=int, default=DEFAULT_MIN_SCORE)
     c.set_defaults(func=cmd_check)
+
+    b = sub.add_parser("bot", help="Telegram-бот: присылает подходящие заказы, управляется из чата")
+    b.add_argument("--pages", type=int, default=2, help="сколько страниц Kwork проверять за раз")
+    b.add_argument("--delay", type=float, default=2.0, help="пауза между запросами к Kwork, с")
+    b.add_argument("--ai", choices=MODES, help=AI_HELP)
+    b.add_argument("--state", default="results/telegram_bot.json", help="где хранить настройки бота")
+    b.set_defaults(func=cmd_bot)
     return parser
 
 

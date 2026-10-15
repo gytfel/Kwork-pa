@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shlex
 from pathlib import Path
 from typing import Callable
@@ -25,6 +26,7 @@ Kwork-pa — заказы и клиенты, с которыми справит�
   2. Следить за Kwork и показывать новые заказы
   3. Найти клиентов в 2ГИС
   4. Проверить текст задачи
+  5. Запустить Telegram-бота (заказы в телефон)
   0. Выход
 """
 
@@ -105,8 +107,14 @@ def save_to_env(key: str, value: str, path: Path = Path(".env")) -> None:
     os.environ[key] = value
 
 
-def _claude_available() -> bool:
-    return bool(os.environ.get("ANTHROPIC_API_KEY"))
+def _drafts_source() -> str:
+    """Чем будут написаны черновики — показываем в вопросе, чтобы не было сюрпризов."""
+    from .ai import DESCRIPTIONS, AIError, detect_mode
+
+    try:
+        return DESCRIPTIONS[detect_mode()]
+    except AIError:
+        return DESCRIPTIONS["templates"]
 
 
 def kwork_args(pages_default: int = 3) -> list[str]:
@@ -118,8 +126,8 @@ def kwork_args(pages_default: int = 3) -> list[str]:
     if min_price:
         argv += ["--min-price", str(min_price)]
     argv += ["--pages", str(ask_int("Сколько страниц смотреть", pages_default, minimum=1))]
-    if _claude_available() and ask_yes("Перепроверить заказы через Claude API и написать черновики откликов?"):
-        argv.append("--llm")
+    if ask_yes(f"Добавить черновики откликов? ({_drafts_source()})"):
+        argv.append("--drafts")
     return argv
 
 
@@ -131,7 +139,7 @@ def watch_args() -> list[str]:
         if ask_yes("Присылать подходящие заказы в Telegram?", True):
             argv.append("--telegram")
     else:
-        print("  Чтобы получать заказы в Telegram, заполните TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID в .env")
+        print("  Удобнее получать заказы в Telegram: пункт 5 меню запустит бота, он сам запомнит ваш чат.")
     print("  Остановить слежение: Ctrl+C")
     return argv
 
@@ -156,7 +164,7 @@ def leads_args() -> list[str] | None:
             argv += ["--query", niche.strip()]
     if ask_yes("Проверять сайты компаний (дольше, но точнее)?", True):
         argv.append("--audit")
-    if _claude_available() and ask_yes("Написать черновики сообщений компаниям через Claude API?"):
+    if ask_yes(f"Написать черновики сообщений компаниям? ({_drafts_source()})"):
         argv.append("--pitch")
     return argv
 
@@ -180,11 +188,32 @@ def check_args() -> list[str] | None:
     return ["check", "--", text] if text else None
 
 
+def bot_args() -> list[str] | None:
+    if not os.environ.get("TELEGRAM_BOT_TOKEN"):
+        print("Сначала создайте бота — это бесплатно и занимает минуту:")
+        print("  1) откройте в Telegram @BotFather и отправьте ему /newbot;")
+        print("  2) придумайте имя и адрес бота (адрес должен заканчиваться на bot);")
+        print("  3) BotFather пришлёт токен вида 123456789:AA... — скопируйте его.")
+        token = ask("Вставьте токен (Enter — назад в меню)")
+        if not token:
+            return None
+        if not re.fullmatch(r"\d+:[\w-]{20,}", token):
+            print("Это не похоже на токен бота: он выглядит как 123456789:AAH4k... Попробуйте ещё раз.")
+            return None
+        if ask_yes("Сохранить токен в .env, чтобы не вводить снова?", True):
+            save_to_env("TELEGRAM_BOT_TOKEN", token)
+        else:
+            os.environ["TELEGRAM_BOT_TOKEN"] = token
+    print("  Бот работает, пока открыто это окно. Остановить — Ctrl+C.")
+    return ["bot"]
+
+
 ACTIONS: dict[str, Callable[[], list[str] | None]] = {
     "1": kwork_args,
     "2": watch_args,
     "3": leads_args,
     "4": check_args,
+    "5": bot_args,
 }
 
 
