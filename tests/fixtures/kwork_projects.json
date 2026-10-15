@@ -1,0 +1,28 @@
+{
+  "success": true,
+  "data": {
+    "pagination": {"current_page": 1, "last_page": 12},
+    "wants": [
+      {
+        "id": 2712345,
+        "name": "Парсер товаров с сайта поставщика",
+        "description": "Нужно написать парсер на Python.<br>Собирать цены и остатки, выгружать в Excel.",
+        "priceLimit": "5000.00",
+        "possiblePriceLimit": 15000,
+        "category_id": 41,
+        "kwork_count": 4,
+        "timeLeft": "2 дня 5 часов",
+        "user": {"username": "shop_owner", "data": {"wants_hired_percent": 67}}
+      },
+      {
+        "id": 2712346,
+        "name": "Смонтировать видео для YouTube",
+        "description": "Ролик 15 минут, цветокоррекция, титры",
+        "priceLimit": "3000",
+        "possiblePriceLimit": "9000",
+        "kwork_count": 12,
+        "user": {"username": "blogger"}
+      }
+    ]
+  }
+}
