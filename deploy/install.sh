@@ -2,7 +2,8 @@
 # Установка kwork-pa на VPS как службы systemd: бот работает круглосуточно,
 # перезапускается после сбоев и после перезагрузки сервера.
 #
-# Обычно запускается сам командой `kwork-pa deploy user@IP` с вашего компьютера.
+# Обычно запускается сам командой `./run.sh deploy user@IP` (Windows: .\run.bat deploy …)
+# с вашего компьютера.
 # Вручную, на сервере из папки проекта:  sudo bash deploy/install.sh
 #
 # Поддерживаются Ubuntu 22.04+, Debian 12+, а также Alma/Rocky/CentOS Stream 9 и Fedora.
@@ -65,26 +66,60 @@ pick_python() {
   return 1
 }
 
+have_basics() { pick_python >/dev/null && command -v curl >/dev/null 2>&1; }
+pkg_failed() {  # если Python и curl уже есть — сбой менеджера пакетов не мешает установке
+  if have_basics; then
+    echo "Внимание: $1, но всё нужное уже установлено — продолжаю."
+  else
+    die "$1. Возможно, на сервере уже идёт другая установка или обновление пакетов — подождите пару минут и запустите снова."
+  fi
+}
+
+# На свежем VPS первые минуты работают автообновления и держат блокировку apt — ждём их.
+APT=(apt-get -y -qq -o DPkg::Lock::Timeout=600
+     -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold)
+apt_update() {
+  for attempt in $(seq 1 60); do
+    if out=$(apt-get update -qq 2>&1); then return 0; fi
+    if ! printf '%s' "$out" | grep -q "Could not get lock\|Unable to lock"; then
+      printf '%s\n' "$out" >&2
+      return 1
+    fi
+    [ "$attempt" -eq 1 ] && echo "Менеджер пакетов занят (идут автообновления) — жду…"
+    sleep 10
+  done
+  return 1
+}
+
 say "Ставлю системные пакеты (Python, сертификаты, curl)"
 if command -v apt-get >/dev/null 2>&1; then
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update -qq || die "apt-get update не сработал — проверьте интернет на сервере"
-  apt-get install -y -qq python3 python3-venv ca-certificates curl tar >/dev/null \
-    || die "не удалось установить пакеты через apt-get"
+  if command -v cloud-init >/dev/null 2>&1; then
+    cloud-init status --wait >/dev/null 2>&1 || true  # сервер ещё настраивается после создания
+  fi
+  # </dev/null — чтобы dpkg не ждал ответа на вопрос, которого не видно
+  dpkg --configure -a --force-confdef --force-confold </dev/null >/dev/null 2>&1 || true
+  if ! apt_update; then
+    pkg_failed "apt-get update не сработал (нет интернета или apt занят)"
+  elif ! "${APT[@]}" install python3 python3-venv ca-certificates curl tar </dev/null >/dev/null; then
+    pkg_failed "не удалось установить пакеты через apt-get"
+  fi
   if ! pick_python >/dev/null; then
     for v in 3.12 3.11 3.10; do
-      apt-get install -y -qq "python$v" "python$v-venv" >/dev/null 2>&1 && break
+      "${APT[@]}" install "python$v" "python$v-venv" </dev/null >/dev/null 2>&1 && break
     done
   fi
 elif command -v dnf >/dev/null 2>&1; then
-  dnf install -y -q python3 ca-certificates curl tar >/dev/null || die "не удалось установить пакеты через dnf"
+  # /usr/bin/curl, а не пакет curl: в некоторых образах стоит curl-minimal, и dnf откажется
+  dnf install -y -q python3 ca-certificates tar /usr/bin/curl >/dev/null \
+    || pkg_failed "не удалось установить пакеты через dnf"
   if ! pick_python >/dev/null; then
     for v in 3.12 3.11; do
       dnf install -y -q "python$v" >/dev/null 2>&1 && break
     done
   fi
 elif command -v yum >/dev/null 2>&1; then
-  yum install -y -q python3 ca-certificates curl tar >/dev/null || die "не удалось установить пакеты через yum"
+  yum install -y -q python3 ca-certificates curl tar >/dev/null || pkg_failed "не удалось установить пакеты через yum"
 else
   echo "Не знаю менеджер пакетов этой системы — пропускаю установку пакетов."
 fi
@@ -214,18 +249,26 @@ fi
 
 systemctl daemon-reload
 systemctl enable "$SERVICE" >/dev/null 2>&1
+STARTED=0
 if [ "$START" -eq 1 ]; then
-  say "Запускаю бота"
+  say "Запускаю бота и жду, пока он подключится к Telegram"
+  since=$(date '+%Y-%m-%d %H:%M:%S')
   systemctl restart "$SERVICE"
-  sleep 4
-  if systemctl is-active --quiet "$SERVICE"; then
+  # бот пишет «Бот запущен», когда Telegram ответил; ждём дольше таймаута соединения (30 с)
+  for _ in $(seq 1 50); do
+    sleep 1
+    if journalctl -u "$SERVICE" --since "$since" -o cat 2>/dev/null | grep -q "Бот запущен"; then
+      STARTED=1
+      break
+    fi
+    systemctl is-failed --quiet "$SERVICE" && break
+  done
+  if [ "$STARTED" -eq 1 ]; then
     echo "Бот работает."
   else
     echo "Бот не запустился. Последние строки журнала:"
+    journalctl -u "$SERVICE" --since "$since" -n 12 --no-pager -o cat 2>/dev/null || true
   fi
-  journalctl -u "$SERVICE" -n 8 --no-pager -o cat 2>/dev/null || true
-else
-  echo "Служба установлена, но не запущена."
 fi
 
 if [ -z "$(env_value KWORK_PA_AI)" ] && [ ! -x "$HOME_DIR/.local/bin/claude" ] && [ -z "$(env_value ANTHROPIC_API_KEY)" ]; then
@@ -235,9 +278,24 @@ else
   CLAUDE_HINT="  kwork-pa-ctl claude    — войти в Claude Code заново"
 fi
 
-cat <<EOF
+if [ "$STARTED" -eq 1 ]; then
+  printf '\nГотово! Откройте своего бота в Telegram и нажмите «Старт».\n'
+elif [ "$START" -eq 0 ] && [ -z "$TOKEN" ]; then
+  printf '\nПрограмма установлена, бот пока не запущен. Добавьте токен: kwork-pa-ctl env (бот запустится сам).\n'
+elif [ "$START" -eq 0 ]; then
+  printf '\nПрограмма установлена, бот не запущен. Запустить: kwork-pa-ctl start\n'
+else
+  cat <<'MSG'
 
-Готово! Откройте своего бота в Telegram и нажмите «Старт».
+Установка завершена, но бот не запустился — причина в журнале выше. Частые случаи:
+  • неверный токен — исправьте TELEGRAM_BOT_TOKEN: kwork-pa-ctl env
+  • сервер не достаёт до api.telegram.org (бывает на серверах в России) — нужен сервер
+    за рубежом или зеркало Bot API в TELEGRAM_API_URL: kwork-pa-ctl env
+Посмотреть журнал: kwork-pa-ctl logs
+MSG
+fi
+
+cat <<EOF
 
 Управление ботом на сервере:
   kwork-pa-ctl status    — работает ли бот
@@ -248,5 +306,9 @@ $CLAUDE_HINT
   kwork-pa-ctl run …     — любая команда программы, например: kwork-pa-ctl run check "текст задачи"
   kwork-pa-ctl uninstall — удалить службу
 
-Обновить бота: снова выполните  kwork-pa deploy  на своём компьютере — настройки на сервере сохранятся.
+Обновить бота: снова выполните на своём компьютере из папки проекта  ./run.sh deploy …
+(Windows: .\run.bat deploy …) или пункт 6 меню — настройки на сервере сохранятся.
 EOF
+if [ "$START" -eq 1 ] && [ "$STARTED" -eq 0 ]; then
+  exit 4  # установлено, но бот не запустился — deploy покажет это отдельно
+fi

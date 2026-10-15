@@ -132,3 +132,89 @@ def test_uploaded_archive_is_private(tmp_path):
 
     deploy("root@h", root=root, runner=run, which=lambda name: name, log=lambda s: None)
     assert modes == [0o600]
+
+
+@pytest.mark.parametrize("shell", ["sh", "bash", "dash", "zsh", "fish", "ksh", "tcsh"])
+@pytest.mark.parametrize("installer_rc", [0, 7])
+def test_remote_command_works_under_any_login_shell(tmp_path, shell, installer_rc):
+    # ssh выполняет команду оболочкой пользователя на сервере: zsh/fish/tcsh не должны ломать установку
+    import shutil
+
+    if not shutil.which(shell):
+        pytest.skip(f"{shell} не установлен")
+    payload = tmp_path / "payload" / "deploy"
+    payload.mkdir(parents=True)
+    (payload / "install.sh").write_text(f"exit {installer_rc}\n")
+    archive = tmp_path / "upload.tgz"
+    with tarfile.open(archive, "w:gz") as tar:
+        tar.add(payload.parent, arcname=".")
+    env = {"PATH": "/usr/bin:/bin", "TMPDIR": str(tmp_path / "tmp")}
+    (tmp_path / "tmp").mkdir()
+    command = remote_command(str(archive), ["--no-start"])
+    result = subprocess.run([shutil.which(shell), "-c", command], env=env, capture_output=True, text=True)
+    if installer_rc == 0 and result.returncode != 0 and "sudo" in result.stderr:
+        pytest.skip("не root — sudo в тесте недоступен")
+    assert result.returncode == installer_rc, result.stderr
+    assert not archive.exists()  # архив с токеном удалён
+    assert list((tmp_path / "tmp").iterdir()) == []  # временная папка тоже
+
+
+@pytest.mark.parametrize("target,user,host", [
+    ("root@203.0.113.10", "root", "203.0.113.10"),
+    ("203.0.113.10", "root", "203.0.113.10"),
+    ("admin@[2001:db8::1]", "admin", "2001:db8::1"),
+    ("2001:db8::1", "root", "2001:db8::1"),
+])
+def test_split_target(target, user, host):
+    from kwork_pa.deploy import split_target
+
+    assert split_target(target) == (user, host)
+
+
+def test_ipv6_target_is_bracketed_only_for_scp(tmp_path):
+    calls, _ = run_deploy(tmp_path, target="root@2001:db8::1")
+    assert calls[0][-1].startswith("root@[2001:db8::1]:/tmp/kwork-pa-")
+    assert calls[1][-2] == "root@2001:db8::1"  # ssh скобки не понимает
+
+
+def test_local_proxy_is_not_shipped_to_server(tmp_path):
+    from kwork_pa.deploy import server_env
+
+    text = ("\ufeffTELEGRAM_BOT_TOKEN=123:abc\r\nHTTPS_PROXY=socks5h://127.0.0.1:1080\n"
+            "export http_proxy='http://user:pw@localhost:3128'\nALL_PROXY=socks5://proxy.example.com:1080\n")
+    result, disabled = server_env(text)
+    assert disabled == ["HTTPS_PROXY", "export http_proxy"]
+    assert "TELEGRAM_BOT_TOKEN=123:abc" in result.splitlines()
+    assert "ALL_PROXY=socks5://proxy.example.com:1080" in result.splitlines()  # внешний прокси оставляем
+    assert all(line.startswith("# отключено") for line in result.splitlines() if "127.0.0.1" in line or "localhost" in line)
+    assert "\ufeff" not in result
+
+
+def test_local_proxy_warning_and_archive_content(tmp_path):
+    root = make_project(tmp_path)
+    (root / ".env").write_text("TELEGRAM_BOT_TOKEN=1:x\nHTTPS_PROXY=socks5h://127.0.0.1:1080\n")
+    logs = []
+    archive = tmp_path / "a.tgz"
+    build_archive(archive, root, log=logs.append)
+    assert any("HTTPS_PROXY" in line for line in logs)
+    with tarfile.open(archive) as tar:
+        env = tar.extractfile(".env").read().decode()
+    assert "\nHTTPS_PROXY=" not in "\n" + env and "TELEGRAM_BOT_TOKEN=1:x" in env
+
+
+def test_installed_but_bot_not_started_is_reported(tmp_path):
+    with pytest.raises(DeployError, match="установлена, но бот не запустился"):
+        run_deploy(tmp_path, codes=(0, 4), target="root@h")
+
+
+def test_cli_deploy_uses_project_folder_when_installed_with_pip(tmp_path, monkeypatch):
+    from kwork_pa import cli, deploy as deploy_module
+
+    project = make_project(tmp_path)
+    (project / "kwork_pa" / "__init__.py").write_text("")
+    monkeypatch.setattr(deploy_module, "ROOT", tmp_path / "site-packages")
+    seen = {}
+    monkeypatch.setattr(deploy_module, "deploy", lambda target, **kw: seen.update(kw) or 0)
+    monkeypatch.chdir(project)
+    assert cli.main(["deploy", "root@h"]) == 0
+    assert seen["root"] == project

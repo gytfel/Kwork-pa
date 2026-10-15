@@ -380,7 +380,13 @@ def cmd_bot(args: argparse.Namespace) -> int:
 def cmd_deploy(args: argparse.Namespace) -> int:
     from .deploy import ROOT, DeployError, deploy
 
-    if not (ROOT / "deploy" / "install.sh").is_file():
+    root = ROOT
+    if not (root / "deploy" / "install.sh").is_file():
+        # установлено через pip/pipx — тогда берём папку проекта, из которой запустили команду
+        cwd = Path.cwd()
+        if (cwd / "deploy" / "install.sh").is_file() and (cwd / "kwork_pa" / "__init__.py").is_file():
+            root = cwd
+    if not (root / "deploy" / "install.sh").is_file():
         print("Установщик не найден: запускайте эту команду из папки проекта — ./run.sh deploy … "
               "(Windows: .\\run.bat deploy …)", file=sys.stderr)
         return 2
@@ -392,6 +398,7 @@ def cmd_deploy(args: argparse.Namespace) -> int:
             include_env=not args.no_env,
             replace_env=args.replace_env,
             start=not args.no_start,
+            root=root,
         )
     except DeployError as exc:
         print(f"Ошибка: {exc}", file=sys.stderr)

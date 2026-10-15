@@ -17,6 +17,27 @@ need_root() {
 
 as_app() { runuser -u "$APP_USER" -- env HOME="$HOME_DIR" TERM="${TERM:-xterm}" "$@"; }
 
+# После перезапуска убеждаемся, что бот действительно подключился к Telegram.
+check_started() {
+  since=$1
+  for _ in $(seq 1 45); do
+    sleep 1
+    if journalctl -u "$SERVICE" --since "$since" -o cat 2>/dev/null | grep -q "Бот запущен"; then
+      echo "Бот работает."
+      return 0
+    fi
+    systemctl is-failed --quiet "$SERVICE" && break
+  done
+  echo "Бот не запустился. Последние строки журнала:"
+  journalctl -u "$SERVICE" --since "$since" -n 10 --no-pager -o cat 2>/dev/null
+  return 1
+}
+
+restart_and_check() {
+  since=$(date '+%Y-%m-%d %H:%M:%S')
+  systemctl restart "$SERVICE" && check_started "$since"
+}
+
 usage() {
   cat <<EOF
 Управление Telegram-ботом kwork-pa:
@@ -42,9 +63,13 @@ case "$cmd" in
     need_root logs "$@"
     journalctl -u "$SERVICE" -f -n 50 -o cat
     ;;
-  restart | stop | start)
+  restart | start)
     need_root "$cmd" "$@"
-    systemctl "$cmd" "$SERVICE" && echo "Готово: $cmd"
+    restart_and_check
+    ;;
+  stop)
+    need_root stop "$@"
+    systemctl stop "$SERVICE" && echo "Бот остановлен."
     ;;
   env)
     need_root env "$@"
@@ -59,21 +84,32 @@ case "$cmd" in
     sed -i 's/\r$//' "$APP_DIR/.env"
     chown "$APP_USER:$APP_USER" "$APP_DIR/.env"
     chmod 600 "$APP_DIR/.env"
-    systemctl restart "$SERVICE" && echo "Настройки сохранены, бот перезапущен."
+    echo "Настройки сохранены, перезапускаю бота…"
+    restart_and_check
     ;;
   claude)
     need_root claude "$@"
     if [ ! -x "$CLAUDE" ]; then
       echo "Устанавливаю Claude Code для пользователя $APP_USER…"
-      as_app bash -c 'curl -fsSL https://claude.ai/install.sh | bash' || { echo "Не удалось установить Claude Code."; exit 1; }
+      # pipefail внутри: иначе ошибка скачивания (например, claude.ai недоступен) выглядит как успех
+      as_app bash -c 'set -o pipefail; curl -fsSL https://claude.ai/install.sh | bash'
+    fi
+    if [ ! -x "$CLAUDE" ]; then
+      echo "Не удалось установить Claude Code. Скорее всего, claude.ai недоступен с этого сервера"
+      echo "(так бывает на серверах в России). Черновики будут по шаблонам."
+      exit 1
     fi
     echo
     echo "Сейчас откроется Claude Code. Войдите в свой аккаунт Claude (Pro/Max):"
     echo "он покажет ссылку — откройте её на телефоне или компьютере и вставьте код обратно."
     echo "Когда вход выполнен, выйдите командой /exit."
     echo
-    (cd "$HOME_DIR" && as_app "$CLAUDE")
-    systemctl restart "$SERVICE" && echo "Бот перезапущен: черновики теперь пишет Claude Code."
+    if ! (cd "$HOME_DIR" && as_app "$CLAUDE"); then
+      echo "Claude Code завершился с ошибкой — попробуйте ещё раз: kwork-pa-ctl claude"
+      exit 1
+    fi
+    echo "Если вы вошли в аккаунт, черновики теперь пишет Claude Code. Перезапускаю бота…"
+    restart_and_check
     ;;
   run)
     need_root run "$@"
@@ -87,11 +123,11 @@ case "$cmd" in
     if [ "${1:-}" = "--purge" ]; then
       rm -rf "$APP_DIR" "$HOME_DIR"
       userdel "$APP_USER" 2>/dev/null
+      rm -f /usr/local/bin/kwork-pa-ctl
       echo "Бот, его файлы и пользователь $APP_USER удалены."
     else
       echo "Служба удалена. Файлы и настройки остались в $APP_DIR (удалить всё: kwork-pa-ctl uninstall --purge)."
     fi
-    rm -f /usr/local/bin/kwork-pa-ctl
     ;;
   help | -h | --help)
     usage
