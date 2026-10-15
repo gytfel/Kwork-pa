@@ -380,3 +380,94 @@ def test_telegram_api_parses_answers_and_errors():
     with pytest.raises(TelegramError) as info:
         TelegramAPI("123:SECRET", down).call("getMe")
     assert "SECRET" not in str(info.value)
+
+
+def test_bare_keyword_shows_filter_instead_of_clearing_it(make_bot):
+    bot, api = make_bot(fetch=lambda: [])
+    api.updates = [message(OWNER, "/start"), message(OWNER, "/keyword парсер"), message(OWNER, "/keyword")]
+    bot.step()
+    assert bot.state.settings.keyword == "парсер"
+    assert "Сейчас слово: парсер" in api.texts()[-1]
+
+
+def test_command_followed_by_newline(make_bot):
+    bot, api = make_bot(fetch=lambda: [])
+    api.updates = [message(OWNER, "/start"), message(OWNER, "/check\nНужен парсер сайта на Python\nсобрать цены")]
+    bot.step()
+    assert api.texts()[-1].startswith("✅ Подходит")
+
+
+def test_refused_start_is_explained_in_console(make_bot):
+    bot, api = make_bot(allowed_chat="@my_channel")
+    logs = []
+    bot.log = logs.append
+    api.updates = [message(OWNER, "/start")]
+    bot.step()
+    assert bot.state.owner is None
+    assert any("TELEGRAM_CHAT_ID=@my_channel" in line for line in logs)
+
+
+def test_new_owner_gets_fresh_selection(make_bot, tmp_path):
+    bot, api = make_bot()
+    for project_id in (1, 2, 3):
+        bot.seen.add(project_id)  # видел прежний владелец
+    api.updates = [message(OWNER, "/start")]
+    bot.step()
+    assert len([p for p in api.sent(OWNER) if "reply_markup" in p]) == 5
+
+
+def test_check_ids_and_draft_buttons_survive_restart(make_bot, tmp_path):
+    bot, api = make_bot(fetch=lambda: [])
+    api.updates = [message(OWNER, "/start"), message(OWNER, "Нужен парсер сайта на Python")]
+    bot.step()
+    old_button = api.sent()[-1]["reply_markup"]["inline_keyboard"][0][0]["callback_data"]
+
+    restarted, api2 = make_bot(fetch=lambda: [])
+    api2.updates = [message(OWNER, "Перевести инструкцию на английский")]
+    restarted.step()
+    new_button = api2.sent()[-1]["reply_markup"]["inline_keyboard"][0][0]["callback_data"]
+    assert new_button != old_button  # номера не повторяются
+
+    api2.updates = [callback(OWNER, old_button)]
+    restarted.step()
+    draft = api2.sent()[-1]["text"]
+    assert "Сделаю парсер" in draft  # черновик для того самого текста, а не для нового
+
+
+def test_project_buttons_survive_restart(make_bot):
+    bot, api = make_bot(fetch=lambda: projects(2))
+    api.updates = [message(OWNER, "/start")]
+    bot.step()
+    restarted, api2 = make_bot(fetch=lambda: [])
+    api2.updates = [callback(OWNER, "draft:2")]
+    restarted.step()
+    assert "Черновик отклика" in api2.sent()[-1]["text"]
+
+
+def test_leads_needs_comma_and_splits_niches(make_bot):
+    class RecordingDgis(FakeDgis):
+        queries = []
+
+        def iter_companies(self, query, **kwargs):
+            self.queries.append(query)
+            return super().iter_companies(query, **kwargs)
+
+    dgis = RecordingDgis()
+    bot, api = make_bot(fetch=lambda: [], dgis=dgis)
+    api.updates = [message(OWNER, "/start"), message(OWNER, "/leads Казань стоматология")]
+    bot.step()
+    assert "через запятую" in api.texts()[-1] and dgis.queries == []
+    api.updates = [message(OWNER, "/leads Казань, стоматология, автосервис")]
+    bot.step()
+    assert dgis.queries == ["стоматология", "автосервис"]
+
+
+def test_kwork_error_in_chat_has_bot_advice(make_bot):
+    def broken():
+        raise KworkError("суть. Совет для CLI: --from-file", reason="суть")
+
+    bot, api = make_bot(fetch=broken)
+    api.updates = [message(OWNER, "/start")]
+    bot.step()
+    warning = [t for t in api.texts() if "Не получилось" in t][0]
+    assert "--from-file" not in warning and "KWORK_COOKIE" in warning and "перезапустите бота" in warning

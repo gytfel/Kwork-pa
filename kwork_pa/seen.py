@@ -30,5 +30,10 @@ class SeenStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(self.ids), encoding="utf-8")
 
+    def clear(self) -> None:
+        self.ids = []
+        self._set = set()
+        self.save()
+
     def __len__(self) -> int:
         return len(self.ids)

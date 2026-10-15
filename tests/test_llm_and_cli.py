@@ -257,3 +257,63 @@ def test_cli_bot_requires_token(monkeypatch, capsys):
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
     assert main(["bot"]) == 2
     assert "@BotFather" in capsys.readouterr().err
+
+
+def test_ai_failure_switches_rest_of_run_to_templates(tmp_path, capsys, monkeypatch):
+    from kwork_pa import ai
+
+    calls = {"n": 0}
+
+    def broken_complete(self, system, user, schema, max_tokens):
+        calls["n"] += 1
+        raise ai.AIError("Claude Code: Not logged in")
+
+    monkeypatch.setattr(ai, "find_claude_cli", lambda: "/bin/claude")
+    monkeypatch.setattr(ai.ClaudeCodeBackend, "complete", broken_complete)
+    many = tmp_path / "many.json"
+    many.write_text(json.dumps({"data": {"wants": [
+        {"id": i, "name": f"Парсер сайта на Python {i}", "description": "Excel", "priceLimit": 1000}
+        for i in range(1, 6)
+    ]}}), encoding="utf-8")
+    out = tmp_path / "r"
+    assert main(["kwork", "--from-file", str(many), "--drafts", "--ai", "claude-code",
+                 "--out", str(out), "--format", "json"]) == 0
+    assert calls["n"] == 1  # не мучаем сломанный Claude на каждом заказе
+    rows = json.loads(out.with_suffix(".json").read_text("utf-8"))
+    assert len(rows) == 5 and all(r["claude_source"] == "templates" for r in rows)
+    assert "Остальные черновики — по шаблонам" in capsys.readouterr().err
+
+
+def test_send_telegram_honours_api_url(monkeypatch):
+    from kwork_pa.notify import send_telegram
+
+    class Session:
+        url = None
+
+        def post(self, url, json=None, timeout=None):
+            Session.url = url
+
+            class R:
+                def raise_for_status(self):
+                    pass
+            return R()
+
+    monkeypatch.setenv("TELEGRAM_API_URL", "http://mirror.local/")
+    send_telegram("123:abc", "1", "hi", session=Session())
+    assert Session.url == "http://mirror.local/bot123:abc/sendMessage"
+
+
+def test_cli_bot_warns_about_non_numeric_chat_id(monkeypatch, capsys):
+    from kwork_pa import bot as bot_module
+
+    class Stop(Exception):
+        pass
+
+    def fake_run(self):
+        raise bot_module.BotStopped("stop")
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:abc")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "@my_channel")
+    monkeypatch.setattr(bot_module.KworkBot, "run", fake_run)
+    assert main(["bot", "--state", "/nonexistent-dir-for-test/bot.json"]) == 1
+    assert "это не номер чата" in capsys.readouterr().err

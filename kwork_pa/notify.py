@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import html
+import os
 from typing import Any
 
 import requests
@@ -88,5 +89,6 @@ def send_telegram(
     }
     if reply_markup:
         payload["reply_markup"] = reply_markup
-    resp = session.post(f"https://api.telegram.org/bot{token}/sendMessage", json=payload, timeout=30)
+    base = (os.environ.get("TELEGRAM_API_URL") or "https://api.telegram.org").rstrip("/")
+    resp = session.post(f"{base}/bot{token}/sendMessage", json=payload, timeout=30)
     resp.raise_for_status()

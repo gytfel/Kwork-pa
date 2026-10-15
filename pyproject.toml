@@ -9,7 +9,7 @@ description = "Поиск заказов на Kwork и клиентов в 2ГИ
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "requests>=2.31",
+    "requests[socks]>=2.31",
     "beautifulsoup4>=4.12",
     "anthropic>=1.14",
 ]

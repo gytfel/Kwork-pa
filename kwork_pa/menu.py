@@ -188,6 +188,18 @@ def check_args() -> list[str] | None:
     return ["check", "--", text] if text else None
 
 
+def token_accepted(token: str) -> bool:
+    """False, только если Telegram прямо ответил «неверный токен». Если Telegram недоступен
+    (блокировка, нет сети) — токен всё равно сохраняем: проверить его сейчас нельзя."""
+    from .bot import TelegramAPI, TelegramError
+
+    try:
+        TelegramAPI(token).call("getMe", http_timeout=15)
+    except TelegramError as exc:
+        return exc.status not in (401, 404)
+    return True
+
+
 def bot_args() -> list[str] | None:
     if not os.environ.get("TELEGRAM_BOT_TOKEN"):
         print("Сначала создайте бота — это бесплатно и занимает минуту:")
@@ -199,6 +211,9 @@ def bot_args() -> list[str] | None:
             return None
         if not re.fullmatch(r"\d+:[\w-]{20,}", token):
             print("Это не похоже на токен бота: он выглядит как 123456789:AAH4k... Попробуйте ещё раз.")
+            return None
+        if not token_accepted(token):
+            print("Telegram не принял этот токен — скопируйте его у @BotFather ещё раз, целиком.")
             return None
         if ask_yes("Сохранить токен в .env, чтобы не вводить снова?", True):
             save_to_env("TELEGRAM_BOT_TOKEN", token)

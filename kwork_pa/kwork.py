@@ -30,7 +30,9 @@ PROJECTS_URL = f"{BASE_URL}/projects"
 
 
 class KworkError(RuntimeError):
-    pass
+    def __init__(self, message: str, reason: str | None = None) -> None:
+        super().__init__(message)
+        self.reason = reason or message  # суть ошибки без советов для командной строки
 
 
 @dataclass
@@ -336,10 +338,11 @@ class KworkClient:
         except requests.RequestException as exc:
             errors.append(f"GET: {exc}")
 
+        reason = "Не удалось получить проекты Kwork (" + "; ".join(errors) + ")."
         raise KworkError(
-            "Не удалось получить проекты Kwork (" + "; ".join(errors) + "). "
-            "Возможно, сработала защита от ботов: передайте cookie из браузера "
-            "(KWORK_COOKIE) или сохраните страницу и используйте --from-file."
+            reason + " Возможно, сработала защита от ботов: передайте cookie из браузера "
+            "(KWORK_COOKIE) или сохраните страницу и используйте --from-file.",
+            reason=reason,
         )
 
     def iter_projects(

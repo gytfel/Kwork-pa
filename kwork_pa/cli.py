@@ -116,6 +116,15 @@ def _make_judge(mode: str | None):
     return judge
 
 
+def _fallback_to_templates(judge, exc: Exception):
+    """Ошибка ИИ (не вошли в аккаунт, лимит, завис) почти всегда повторится на каждом
+    заказе — поэтому один раз сообщаем и дальше пишем черновики по шаблонам."""
+    from .llm import ClaudeJudge
+
+    print(f"  {exc}\n  Остальные черновики — по шаблонам.", file=sys.stderr)
+    return ClaudeJudge(mode="templates")
+
+
 def _assess(projects: list[Project], limit: int, mode: str | None) -> list[Project]:
     from .llm import AIError
 
@@ -128,7 +137,8 @@ def _assess(projects: list[Project], limit: int, mode: str | None) -> list[Proje
             try:
                 project.llm = judge.assess_project(project)
             except AIError as exc:
-                print(f"  {exc}", file=sys.stderr)
+                judge = _fallback_to_templates(judge, exc)
+                project.llm = judge.assess_project(project)
             if project.llm is not None and not project.llm.get("can_do"):
                 continue
         kept.append(project)
@@ -283,7 +293,9 @@ def cmd_leads(args: argparse.Namespace) -> int:
             try:
                 lead.pitch = judge.pitch_for_lead(lead)
             except AIError as exc:
-                print(f"  {exc}", file=sys.stderr)
+                judge = _fallback_to_templates(judge, exc)
+                lead.pitch = judge.pitch_for_lead(lead)
+            lead.pitch_is_template = not judge.uses_ai
 
     print(f"Компаний найдено: {len(leads)}, перспективных: {len(selected)}\n")
     for lead in selected:
@@ -312,6 +324,14 @@ def cmd_bot(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+
+    allowed_chat = os.environ.get("TELEGRAM_CHAT_ID", "").strip() or None
+    if allowed_chat and not allowed_chat.lstrip("-").isdigit():
+        print(
+            f"Внимание: TELEGRAM_CHAT_ID={allowed_chat} в .env — это не номер чата, с ним бота никто не "
+            "подключит. Удалите эту строку: бот сам запомнит ваш чат, когда вы нажмёте «Старт».",
+            file=sys.stderr,
+        )
 
     state_path = Path(args.state)
     client = KworkClient(delay=args.delay, cookie=os.environ.get("KWORK_COOKIE"))
@@ -343,7 +363,7 @@ def cmd_bot(args: argparse.Namespace) -> int:
         fetch=fetch,
         seen=SeenStore(state_path.with_name(state_path.stem + "_seen.json")),
         judge_factory=make_judge,
-        allowed_chat=os.environ.get("TELEGRAM_CHAT_ID") or None,
+        allowed_chat=allowed_chat,
         on_owner=remember_owner,
         dgis_factory=make_dgis,
     )

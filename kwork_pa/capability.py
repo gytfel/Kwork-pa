@@ -187,6 +187,9 @@ _COMPILED = {rule.key: rule.compile() for rule in (*CAN_DO, *CANNOT_DO, *FORBIDD
 
 DEFAULT_MIN_SCORE = 3
 
+# Общие навыки уступают узким при равном весе (для выбора шаблона отклика).
+_BROAD = {"website": 2, "texts": 1, "scripts": 1, "messengers": 1}
+
 
 @dataclass
 class Verdict:
@@ -243,5 +246,6 @@ def classify(title: str, description: str = "", min_score: int = DEFAULT_MIN_SCO
 
     score = positive - negative
     ok = not forbidden and positive > 0 and score >= min_score
-    skill_keys = [key for _, key in sorted(weighted, key=lambda item: -item[0])]
+    # при равном весе вперёд — более узкий навык: «исправить ошибку на сайте» — это про баг, не про новый сайт
+    skill_keys = [key for _, key in sorted(weighted, key=lambda item: (-item[0], _BROAD.get(item[1], 0)))]
     return Verdict(ok=ok, score=score, skills=skills, blockers=blockers, forbidden=forbidden, skill_keys=skill_keys)

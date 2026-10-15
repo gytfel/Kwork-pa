@@ -88,7 +88,21 @@ class ApiBackend:
         if client is None:
             import anthropic  # нужен только в этом режиме
 
-            client = anthropic.Anthropic()
+            no_key = AIError(
+                "Для режима api нужен ANTHROPIC_API_KEY в .env. Без ключа подойдёт "
+                "--ai claude-code (подписка) или --ai templates."
+            )
+            try:
+                client = anthropic.Anthropic()
+            except anthropic.AnthropicError as exc:  # например, указан профиль, которого нет
+                raise no_key from exc
+            # SDK находит ключ, токен или профиль сам; если ничего нет — упадёт только при запросе
+            if not (getattr(client, "api_key", None) or getattr(client, "auth_token", None)
+                    or getattr(client, "credentials", None)):
+                raise AIError(
+                    "Для режима api нужен ANTHROPIC_API_KEY в .env. Без ключа подойдёт "
+                    "--ai claude-code (подписка) или --ai templates."
+                )
         self.client = client
 
     def complete(self, system: str, user: str, schema: dict[str, Any] | None, max_tokens: int) -> str | dict | None:
@@ -110,7 +124,7 @@ class ApiBackend:
                 messages=[{"role": "user", "content": user}],
                 **extra,
             )
-        except anthropic.APIError as exc:
+        except (anthropic.AnthropicError, TypeError) as exc:
             raise AIError(f"Claude API: {exc}") from exc
         if response.stop_reason == "refusal":
             return None
@@ -131,7 +145,7 @@ class ClaudeCodeBackend:
         executable: str | None = None,
         model: str | None = None,
         runner: Runner = subprocess.run,
-        timeout: float = 300,
+        timeout: float = 180,
     ) -> None:
         executable = executable or find_claude_cli()
         if not executable:
@@ -146,9 +160,18 @@ class ClaudeCodeBackend:
         # npm-установка на Windows — это claude.cmd: через cmd.exe кавычки в аргументах
         # (JSON-схема, промпт) портятся, поэтому там всё передаём через stdin.
         self.plain_args = executable.lower().endswith((".cmd", ".bat"))
-        # пустая папка — чтобы Claude Code не подхватывал CLAUDE.md и настройки проекта
         self.workdir = Path(tempfile.gettempdir()) / "kwork-pa-claude"
         self.workdir.mkdir(exist_ok=True)
+
+    @staticmethod
+    def child_env() -> dict[str, str]:
+        env = dict(os.environ)
+        # С ANTHROPIC_API_KEY `claude -p` платит по ключу, а не по подписке — убираем его.
+        env.pop("ANTHROPIC_API_KEY", None)
+        # Безопасный режим: без CLAUDE.md, хуков, MCP и плагинов пользователя, чтобы
+        # его личные инструкции не попадали в черновики. Старые версии CLI его игнорируют.
+        env["CLAUDE_CODE_SAFE_MODE"] = "1"
+        return env
 
     def build_command(self, system: str, schema: dict[str, Any] | None) -> list[str]:
         cmd = [
@@ -188,6 +211,7 @@ class ClaudeCodeBackend:
                 errors="replace",
                 timeout=self.timeout,
                 cwd=self.workdir,
+                env=self.child_env(),
             )
         except FileNotFoundError as exc:
             raise AIError(f"Claude Code не запускается: {exc}") from exc
@@ -199,10 +223,14 @@ class ClaudeCodeBackend:
             detail = (proc.stderr or proc.stdout or "").strip()[:300]
             raise AIError(f"Claude Code вернул неожиданный ответ (код {proc.returncode}): {detail}")
         if data.get("is_error") or proc.returncode != 0:
-            message = str(data.get("result") or data.get("subtype") or "ошибка")[:300]
-            raise AIError(
-                f"Claude Code: {message}. Проверьте, что вы вошли в аккаунт (запустите claude и выполните /login)."
-            )
+            message = str(data.get("result") or data.get("subtype") or "ошибка")[:300].strip().rstrip(".")
+            hint = ""
+            lowered = message.lower()
+            if any(word in lowered for word in ("login", "log in", "auth", "401", "credential")):
+                hint = " Войдите в аккаунт: запустите claude и выполните /login."
+            elif "model" in lowered:
+                hint = " Проверьте CLAUDE_CODE_MODEL в .env."
+            raise AIError(f"Claude Code: {message}.{hint}")
         structured = data.get("structured_output")
         if schema and isinstance(structured, dict):
             return structured

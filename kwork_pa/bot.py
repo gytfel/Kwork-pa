@@ -97,6 +97,7 @@ class Settings:
 class BotState:
     owner: int | None = None
     offset: int = 0
+    last_check_id: int = 0  # номера текстов из /check, чтобы старые кнопки не путались после перезапуска
     settings: Settings = field(default_factory=Settings)
 
     @classmethod
@@ -107,7 +108,8 @@ class BotState:
             return cls()
         known = Settings.__dataclass_fields__
         settings = Settings(**{k: v for k, v in (data.get("settings") or {}).items() if k in known})
-        return cls(owner=data.get("owner"), offset=int(data.get("offset") or 0), settings=settings)
+        return cls(owner=data.get("owner"), offset=int(data.get("offset") or 0),
+                   last_check_id=int(data.get("last_check_id") or 0), settings=settings)
 
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -147,11 +149,12 @@ class KworkBot:
         self.clock = clock or time.monotonic
         self.sleep = sleep or time.sleep
         self.log = log
-        self.cache: dict[int, Project] = {}
+        # заказы для кнопки «Черновик отклика» — в файле, чтобы кнопки работали и после перезапуска
+        self.cache_path = state_path.with_name(state_path.stem + "_cache.json")
+        self.cache: dict[int, Project] = self._load_cache()
         self.next_check = 0.0
         self.fetch_failures = 0
         self._judge: Any = None
-        self._check_counter = 0
 
     # --- служебное ------------------------------------------------------------------
 
@@ -186,10 +189,26 @@ class KworkBot:
         except TelegramError as exc:
             self.log(f"Telegram: не удалось отправить сообщение ({exc})")
 
+    _CACHED_FIELDS = ("id", "title", "description", "price", "price_max", "offers", "time_left")
+
+    def _load_cache(self) -> dict[int, Project]:
+        try:
+            rows = json.loads(self.cache_path.read_text(encoding="utf-8"))
+            return {int(row["id"]): Project(**{k: row.get(k) for k in self._CACHED_FIELDS if k in row})
+                    for row in rows}
+        except (OSError, ValueError, TypeError, KeyError):
+            return {}
+
     def remember(self, project: Project) -> None:
         self.cache[project.id] = project
         while len(self.cache) > CACHE_SIZE:
             self.cache.pop(next(iter(self.cache)))
+        rows = [{k: getattr(p, k) for k in self._CACHED_FIELDS} for p in self.cache.values()]
+        try:
+            self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+            self.cache_path.write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
+        except OSError as exc:
+            self.log(f"Не удалось сохранить заказы для кнопок: {exc}")
 
     # --- главный цикл -----------------------------------------------------------------
 
@@ -214,7 +233,10 @@ class KworkBot:
 
     def _fatal(self, exc: TelegramError) -> BotStopped | None:
         if exc.status == 401:
-            return BotStopped("Telegram не принял токен. Проверьте TELEGRAM_BOT_TOKEN (его выдаёт @BotFather).")
+            return BotStopped(
+                "Telegram не принял токен. Он хранится в файле .env в строке TELEGRAM_BOT_TOKEN — "
+                "исправьте её или удалите, и меню спросит токен заново (его выдаёт @BotFather)."
+            )
         if exc.status == 409:
             return BotStopped(
                 "Этот бот уже запущен в другом окне или на другом компьютере. "
@@ -262,10 +284,10 @@ class KworkBot:
         text = (message.get("text") or "").strip()
         if chat_id is None or not text:
             return
-        command, _, arg = text.partition(" ")
+        parts = text.split(None, 1)  # «/check» и текст могут разделять пробел или перевод строки
+        command, arg = parts[0], (parts[1].strip() if len(parts) > 1 else "")
         if command.startswith("/"):
             command = command.split("@", 1)[0].lower()
-            arg = arg.strip()
         else:
             command, arg = "", text
 
@@ -305,9 +327,15 @@ class KworkBot:
             return
         if self.allowed_chat and str(chat_id) != str(self.allowed_chat):
             self.reply(chat_id, "Это личный бот, доступ закрыт.")
+            self.log(
+                f"/start из чата {chat_id} отклонён: в .env указан TELEGRAM_CHAT_ID={self.allowed_chat}. "
+                "Если это ваш чат — удалите эту строку из .env (или впишите туда этот номер) и перезапустите бота."
+            )
             return
         self.state.owner = chat_id
         self.save()
+        # прошлые «просмотренные» видел прежний владелец — новому покажем лучшие из текущих
+        self.seen.clear()
         if self.on_owner:
             self.on_owner(chat_id)
         self.log(f"Бот подключён к чату {chat_id}.")
@@ -385,7 +413,11 @@ class KworkBot:
         self.next_check = min(self.next_check, self.clock() + self.state.settings.interval_min * 60)
 
     def cmd_keyword(self, chat_id: int, arg: str) -> None:
-        self.state.settings.keyword = "" if arg in ("", "-", "сброс") else arg
+        if not arg:
+            current = html.escape(self.state.settings.keyword) or "не задано"
+            self.reply(chat_id, f"Сейчас слово: {current}.\nЗадать: /keyword парсер · сбросить: /keyword -")
+            return
+        self.state.settings.keyword = "" if arg in ("-", "сброс") else arg
         self.save()
         self.reply(chat_id, "Сохранил.\n\n" + self.settings_text())
 
@@ -395,8 +427,9 @@ class KworkBot:
             return
         title, _, description = text.partition("\n")
         verdict = classify(title, description)
-        self._check_counter += 1
-        project = Project(id=-self._check_counter, title=title.strip(), description=description.strip(),
+        self.state.last_check_id += 1
+        self.save()
+        project = Project(id=-self.state.last_check_id, title=title.strip(), description=description.strip(),
                           verdict=verdict)
         self.remember(project)
         head = f"✅ Подходит (балл {verdict.score})" if verdict.ok else f"❌ Не подходит (балл {verdict.score})"
@@ -421,8 +454,16 @@ class KworkBot:
                 "демо-ключ), добавьте в .env строку DGIS_API_KEY=ключ и перезапустите бота.",
             )
             return
-        city, _, query = (part.strip() for part in arg.partition(","))
-        queries = [query] if query else ["автосервис", "салон красоты", "стоматология", "ремонт квартир"]
+        if "," not in arg:
+            # в названии города бывают пробелы («Нижний Новгород»), поэтому угадывать нельзя
+            self.reply(chat_id, "Напишите город и, через запятую, сферу: /leads Казань, стоматология\n"
+                                "Несколько сфер — через запятую. Только город — /leads Казань,")
+            return
+        city, _, rest = arg.partition(",")
+        city = city.strip()
+        query = rest.strip()
+        queries = [q.strip() for q in rest.split(",") if q.strip()] or [
+            "автосервис", "салон красоты", "стоматология", "ремонт квартир"]
         self.reply(chat_id, f"🔎 Ищу в 2ГИС: {html.escape(', '.join(queries))} — {html.escape(city)}…")
         try:
             region = client.find_region(city)
@@ -517,7 +558,12 @@ class KworkBot:
             self.fetch_failures += 1
             self.log(f"Kwork: {exc}")
             if manual or self.fetch_failures == 1:  # не спамим одной и той же ошибкой каждый раунд
-                self.reply(owner, f"⚠️ Не получилось получить заказы с Kwork:\n{html.escape(str(exc))}")
+                self.reply(
+                    owner,
+                    f"⚠️ Не получилось получить заказы с Kwork:\n{html.escape(exc.reason)}\n\n"
+                    "Если Kwork блокирует запросы: добавьте в .env строку KWORK_COOKIE=… (cookie из браузера) "
+                    "и перезапустите бота, или проверяйте реже — /interval 15.",
+                )
             return
         if self.fetch_failures:
             self.log("Kwork снова отвечает.")

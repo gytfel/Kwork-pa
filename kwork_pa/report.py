@@ -91,7 +91,8 @@ def leads_markdown(leads: Iterable[Lead]) -> str:
         if lead.services:
             lines.append("\n**Что предложить:** " + "; ".join(lead.services))
         if lead.pitch:
-            lines.append("\n**Черновик сообщения:**\n\n> " + lead.pitch.replace("\n", "\n> "))
+            label = "Черновик сообщения (шаблон — допишите)" if lead.pitch_is_template else "Черновик сообщения"
+            lines.append(f"\n**{label}:**\n\n> " + lead.pitch.replace("\n", "\n> "))
         lines.append("")
     return "\n".join(lines)
 

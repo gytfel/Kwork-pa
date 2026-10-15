@@ -21,6 +21,12 @@ def answers(monkeypatch):
     return feed
 
 
+@pytest.fixture(autouse=True)
+def no_network_token_check(monkeypatch):
+    # меню проверяет токен запросом getMe — в тестах сеть не трогаем
+    monkeypatch.setattr(menu, "token_accepted", lambda token: True)
+
+
 @pytest.fixture
 def clean_env(monkeypatch, tmp_path):
     for key in ("ANTHROPIC_API_KEY", "DGIS_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "KWORK_PA_PROG",
@@ -91,6 +97,25 @@ def test_bot_rejects_something_that_is_not_a_token(answers, clean_env):
     answers("5", "my bot", "0")
     assert run_menu() == []
     assert not (clean_env / ".env").exists()
+
+
+def test_bot_token_rejected_by_telegram_is_not_saved(answers, clean_env, monkeypatch):
+    monkeypatch.setattr(menu, "token_accepted", lambda token: False)
+    answers("5", "123456789:AAH4kExampleTokenValue_abc-XYZ", "0")
+    assert run_menu() == []
+    assert not (clean_env / ".env").exists()
+
+
+@pytest.mark.parametrize("status,accepted", [(401, False), (404, False), (None, True), (502, True)])
+def test_token_accepted_only_rejects_on_unauthorized(monkeypatch, status, accepted):
+    from kwork_pa import bot
+
+    def fake_call(self, method, params=None, http_timeout=30):
+        raise bot.TelegramError("x", status)
+
+    monkeypatch.undo()  # убрать автозаглушку token_accepted
+    monkeypatch.setattr(bot.TelegramAPI, "call", fake_call)
+    assert menu.token_accepted("123:abc") is accepted
 
 
 def test_bot_with_token_starts_right_away(answers, clean_env, monkeypatch):
