@@ -12,15 +12,61 @@
 Неэтичные заказы отсекаются сразу: накрутки, фейковые отзывы, спам, курсовые и дипломы
 за студентов, обход капчи и защиты.
 
-## Установка
+## Запуск из терминала
+
+Нужен Python 3.10 или новее ([python.org](https://www.python.org/downloads/); на Windows при
+установке отметьте «Add python.exe to PATH»). Скачайте проект (`git clone` или
+Code → Download ZIP) и запустите лаунчер из папки проекта:
+
+```bash
+# Linux / macOS
+./run.sh
+
+# Windows: двойной клик по run.bat или в cmd / PowerShell
+run.bat
+```
+
+При первом запуске лаунчер сам создаст окружение `.venv` и поставит зависимости.
+Это займёт минуту. Потом откроется меню:
+
+```
+  1. Найти заказы на Kwork
+  2. Следить за Kwork и показывать новые заказы
+  3. Найти клиентов в 2ГИС
+  4. Проверить текст задачи
+  0. Выход
+```
+
+Меню задаёт пару вопросов и перед запуском показывает, какой командой сделать то же
+самое без меню. Любую команду из этого README можно передать лаунчеру напрямую:
+
+```bash
+./run.sh kwork --min-price 3000 --llm      # Windows: run.bat kwork --min-price 3000 --llm
+```
+
+Ключи (2ГИС, Claude API, Telegram) лежат в файле `.env`: скопируйте `.env.example` в
+`.env` и заполните. Ключ 2ГИС меню спросит само и предложит сохранить.
+
+### Команда `kwork-pa`
+
+Чтобы запускать без лаунчера, из любой папки:
+
+```bash
+pipx install .        # или: pip install .
+kwork-pa              # меню
+kwork-pa kwork --keyword парсер
+```
+
+`.env` и папка `results/` в этом случае берутся из текущей папки.
+
+### Вручную
 
 ```bash
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-cp .env.example .env    # и заполните ключи
+python -m kwork_pa              # меню
+python -m kwork_pa kwork --help # справка по команде
 ```
-
-Нужен Python 3.10+.
 
 ## Kwork
 

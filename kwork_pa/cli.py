@@ -329,10 +329,25 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
-    load_dotenv()
+def run(argv: list[str]) -> int:
     args = build_parser().parse_args(argv)
     try:
         return args.func(args)
     except KeyboardInterrupt:
+        print()
         return 130
+
+
+def main(argv: list[str] | None = None) -> int:
+    load_dotenv()
+    if argv is None:
+        argv = sys.argv[1:]
+    if not argv:
+        # без аргументов: в терминале — меню, иначе (cron, перенаправление) — справка
+        if sys.stdin.isatty():
+            from .menu import interactive
+
+            return interactive(run)
+        build_parser().print_help()
+        return 2
+    return run(argv)
