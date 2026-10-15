@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Iterator
@@ -137,6 +138,10 @@ class DgisClient:
         self.delay = delay
         self.locale = locale
 
+    def _mask(self, text: str) -> str:
+        # ключ виден в URL запроса, в том числе в URL-кодированном виде
+        return re.sub(r"([?&]key=)[^&\s'\")]+", r"\1***", text).replace(self.api_key, "***")
+
     def _get(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
         time.sleep(self.delay)
         try:
@@ -146,8 +151,7 @@ class DgisClient:
                 timeout=30,
             )
         except requests.RequestException as exc:
-            reason = str(exc).replace(self.api_key, "***")  # ключ виден в URL запроса
-            raise DgisError(f"нет связи с 2ГИС API: {reason}") from exc
+            raise DgisError(f"нет связи с 2ГИС API: {self._mask(str(exc))}") from exc
         try:
             data = resp.json()
         except ValueError as exc:
@@ -158,7 +162,7 @@ class DgisClient:
             return {"items": [], "total": 0}
         if code != 200:
             message = (meta.get("error") or {}).get("message") or resp.text[:200]
-            raise DgisError(f"2ГИС API {code}: {message.replace(self.api_key, '***')}")
+            raise DgisError(f"2ГИС API {code}: {self._mask(message)}")
         return data.get("result") or {}
 
     def find_region(self, city: str) -> str | None:

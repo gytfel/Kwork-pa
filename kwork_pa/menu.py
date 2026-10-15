@@ -31,7 +31,8 @@ Kwork-pa — заказы и клиенты, с которыми справит�
 _SAFE_CHARS = set("_./:=,+-")
 # Символы, которые нельзя одинаково записать для cmd и PowerShell сразу:
 # с ними подсказку на Windows не показываем (сам запуск из меню работает).
-_WINDOWS_UNSAFE = set('"$`&|<>^%')
+# „“” PowerShell тоже считает кавычками, а cmd — нет.
+_WINDOWS_UNSAFE = set('"$`&|<>^%\u201c\u201d\u201e')
 
 
 def quote_arg(arg: str, windows: bool | None = None) -> str:
@@ -58,7 +59,7 @@ def command_line(prog: str, argv: list[str], windows: bool | None = None) -> str
         windows = os.name == "nt"
     if any("\n" in arg for arg in argv):
         return None
-    if windows and any(_WINDOWS_UNSAFE & set(arg) for arg in argv):
+    if windows and any(_WINDOWS_UNSAFE & set(arg) or arg.endswith("\\") for arg in argv):
         return None
     return " ".join([prog, *(quote_arg(a, windows) for a in argv)])
 

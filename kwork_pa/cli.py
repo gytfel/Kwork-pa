@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -31,7 +32,12 @@ def load_dotenv(path: str | Path = ".env") -> None:
             continue
         key, value = line.split("=", 1)
         key = key.strip().removeprefix("export ").strip()
-        os.environ.setdefault(key, value.strip().strip("'\""))
+        value = value.strip()
+        if value[:1] in ("'", '"') and value.count(value[0]) >= 2:
+            value = value[1:value.index(value[0], 1)]
+        else:
+            value = re.split(r"\s+#", value, maxsplit=1)[0]  # KEY=значение  # комментарий
+        os.environ.setdefault(key, value)
 
 
 def _formats(value: str) -> set[str]:
@@ -132,6 +138,31 @@ def _print_project(project: Project) -> None:
         print(f"      Claude: {project.llm.get('summary', '')}")
 
 
+def _mask_telegram(text: str) -> str:
+    return re.sub(r"/bot[^/\s'\"]+", "/bot***", text)  # токен бота виден в URL
+
+
+def _deliver(telegram: tuple[str, str], queue: list[Project]) -> tuple[list[Project], bool]:
+    """Шлёт заказы в Telegram. Возвращает (недоставленные, ошибка не временная)."""
+    from .notify import format_project, send_telegram
+
+    for i, project in enumerate(queue):
+        try:
+            send_telegram(*telegram, format_project(project))
+        except requests.RequestException as exc:
+            print(f"Telegram: не удалось отправить ({_mask_telegram(str(exc))})", file=sys.stderr)
+            status = exc.response.status_code if exc.response is not None else None
+            if status is not None and 400 <= status < 500 and status != 429:
+                print(
+                    "Telegram: проверьте TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID и что вы написали боту /start. "
+                    "Уведомления выключены до перезапуска.",
+                    file=sys.stderr,
+                )
+                return [], True
+            return queue[i:], False
+    return [], False
+
+
 class SeenStore:
     """ID уже показанных проектов — для режима --watch."""
 
@@ -172,6 +203,7 @@ def cmd_kwork(args: argparse.Namespace) -> int:
         telegram = (token, chat)
 
     seen = SeenStore(Path(args.seen_file)) if args.watch else None
+    retry: list[Project] = []  # не дошли до Telegram — отправим в следующем раунде, без повторной проверки
     while True:
         try:
             projects = _collect_projects(args, client)
@@ -196,25 +228,15 @@ def cmd_kwork(args: argparse.Namespace) -> int:
         if selected:
             _save_report(args.out, [p.to_row() for p in selected], report.projects_markdown(selected), args.format)
 
-        undelivered: set[int] = set()
         if telegram:
-            from .notify import format_project, send_telegram
-
-            pending = [p for p in selected if p.verdict and p.verdict.ok]
-            for i, project in enumerate(pending):
-                try:
-                    send_telegram(*telegram, format_project(project))
-                except requests.RequestException as exc:
-                    reason = str(exc).replace(telegram[0], "***")  # токен бота виден в URL
-                    print(f"Telegram: не удалось отправить ({reason})", file=sys.stderr)
-                    # не помечаем как просмотренные — в --watch отправим в следующий раз
-                    undelivered = {p.id for p in pending[i:]}
-                    break
+            retry, permanent = _deliver(telegram, retry + [p for p in selected if p.verdict and p.verdict.ok])
+            retry = retry[-100:]
+            if permanent:
+                telegram = None
 
         if seen is not None:
             for project in projects:
-                if project.id not in undelivered:
-                    seen.add(project.id)
+                seen.add(project.id)
             seen.save()
 
         if not args.watch:

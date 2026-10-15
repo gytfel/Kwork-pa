@@ -15,6 +15,8 @@ if not exist "kwork_pa\__main__.py" goto :notextracted
 if exist ".venv\.created" goto :checkvenv
 rem No marker: keep a working .venv made by hand or by an older run.bat,
 rem otherwise (missing, or creation was interrupted) create it again.
+rem venv writes activate.bat last, after pip: without it creation was cut short.
+if not exist ".venv\Scripts\activate.bat" goto :create
 ".venv\Scripts\python.exe" -c "import sys; sys.exit(sys.version_info < (3, 10))" >nul 2>nul || goto :create
 ".venv\Scripts\python.exe" -m pip --version >nul 2>nul || goto :create
 echo windows> ".venv\.created"
@@ -27,6 +29,7 @@ goto :deps
 
 :create
 rem Never pick the Python of .venv itself (first in PATH when .venv is activated).
+if defined VIRTUAL_ENV if exist "%VIRTUAL_ENV%\Scripts\deactivate.bat" call "%VIRTUAL_ENV%\Scripts\deactivate.bat"
 set "PY="
 py -3 -c "import os, sys; sys.exit(sys.version_info < (3, 10) or os.path.realpath(sys.prefix) == os.path.realpath('.venv'))" >nul 2>nul && set "PY=py -3"
 if not defined PY (python -c "import os, sys; sys.exit(sys.version_info < (3, 10) or os.path.realpath(sys.prefix) == os.path.realpath('.venv'))" >nul 2>nul && set "PY=python")
@@ -34,7 +37,8 @@ if not defined PY goto :nopython
 echo [kwork-pa] Creating virtual environment .venv ...
 if exist ".venv" rmdir /s /q ".venv"
 %PY% -m venv .venv
-if errorlevel 1 goto :venvfail
+rem "neq 0", not "errorlevel 1": Ctrl+C answered N gives a negative exit code
+if %errorlevel% neq 0 goto :venvfail
 echo windows> ".venv\.created"
 
 :deps
@@ -42,7 +46,7 @@ fc /b requirements.txt ".venv\.requirements.installed" >nul 2>nul
 if not errorlevel 1 goto :run
 echo [kwork-pa] Installing dependencies ...
 ".venv\Scripts\python.exe" -m pip install --quiet --disable-pip-version-check -r requirements.txt
-if errorlevel 1 goto :pipfail
+if %errorlevel% neq 0 goto :pipfail
 copy /y requirements.txt ".venv\.requirements.installed" >nul
 
 :run

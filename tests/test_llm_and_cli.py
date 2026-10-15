@@ -143,28 +143,87 @@ def test_redirected_output_is_utf8(tmp_path):
     assert "₽" in result.stdout.decode("utf-8")
 
 
-def test_telegram_failure_hides_token_and_keeps_projects_unseen(tmp_path, capsys, monkeypatch):
+def _watch_rounds(monkeypatch, rounds):
+    """Даёт --watch сделать rounds раундов, потом останавливает (как Ctrl+C)."""
+    calls = {"n": 0}
+
+    def fake_sleep(seconds):
+        calls["n"] += 1
+        if calls["n"] >= rounds:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr("kwork_pa.cli.time.sleep", fake_sleep)
+
+
+def _watch_args(tmp_path):
+    return [
+        "kwork", "--from-file", str(FIXTURES / "kwork_projects.json"), "--telegram", "--watch", "60",
+        "--seen-file", str(tmp_path / "seen.json"), "--out", str(tmp_path / "r"), "--format", "json",
+    ]
+
+
+def test_telegram_transient_failure_retries_delivery_only(tmp_path, capsys, monkeypatch):
     import requests
 
-    token = "123456:SECRETTOKEN"
+    token = "123456:SECRET TOKEN"  # пробел попадёт в URL как %20 — маска всё равно должна сработать
+    sent, attempts = [], {"n": 0}
 
-    def broken_send(tok, chat, text, session=None):
-        raise requests.ConnectionError(f"Max retries exceeded with url: /bot{tok}/sendMessage")
+    def flaky_send(tok, chat, text, session=None):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise requests.ConnectionError("Max retries exceeded with url: /bot123456:SECRET%20TOKEN/sendMessage")
+        sent.append(text)
 
-    def stop_after_first_round(seconds):
-        raise KeyboardInterrupt
-
+    printed = []
+    monkeypatch.setattr("kwork_pa.cli._print_project", lambda p: printed.append(p.id))
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", token)
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
-    monkeypatch.setattr("kwork_pa.notify.send_telegram", broken_send)
-    monkeypatch.setattr("kwork_pa.cli.time.sleep", stop_after_first_round)
-    seen_file = tmp_path / "seen.json"
-    code = main([
-        "kwork", "--from-file", str(FIXTURES / "kwork_projects.json"), "--telegram",
-        "--watch", "60", "--seen-file", str(seen_file), "--out", str(tmp_path / "r"), "--format", "json",
-    ])
-    assert code == 130
+    monkeypatch.setattr("kwork_pa.notify.send_telegram", flaky_send)
+    _watch_rounds(monkeypatch, 2)
+
+    assert main(_watch_args(tmp_path)) == 130
     err = capsys.readouterr().err
-    assert "SECRETTOKEN" not in err and "***" in err
-    # подходящий проект не доставлен — в следующий раз попробуем снова; видео-проект отсеян и просмотрен
-    assert json.loads(seen_file.read_text()) == [2712346]
+    assert "SECRET" not in err and "/bot***" in err
+    assert len(sent) == 1 and "Парсер товаров" in sent[0]  # дошёл во втором раунде
+    assert printed == [2712345]  # но показан и проверен только один раз
+    assert sorted(json.loads((tmp_path / "seen.json").read_text())) == [2712345, 2712346]
+
+
+def test_telegram_permanent_failure_disables_notifications(tmp_path, capsys, monkeypatch):
+    import requests
+
+    attempts = {"n": 0}
+
+    def forbidden(tok, chat, text, session=None):
+        attempts["n"] += 1
+        response = requests.Response()
+        response.status_code = 403
+        raise requests.HTTPError("403 Forbidden: bot can't initiate conversation", response=response)
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "t")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
+    monkeypatch.setattr("kwork_pa.notify.send_telegram", forbidden)
+    monkeypatch.setattr("kwork_pa.cli._collect_projects", lambda args, client: [
+        Project(id=next_id, title="Парсер сайта на Python") for next_id in (next(ids),)
+    ])
+    ids = iter(range(1, 100))
+    _watch_rounds(monkeypatch, 3)
+
+    assert main(_watch_args(tmp_path)) == 130
+    assert attempts["n"] == 1  # после 403 больше не пытаемся
+    assert "Уведомления выключены" in capsys.readouterr().err
+
+
+def test_load_dotenv_strips_inline_comments_and_quotes(tmp_path, monkeypatch):
+    from kwork_pa.cli import load_dotenv
+
+    env = tmp_path / ".env"
+    env.write_text(
+        "A=value  # комментарий\nB='quoted # not a comment'\nC=\"x\"  # c\nD=no#comment\nexport E = e\n",
+        encoding="utf-8",
+    )
+    for key in "ABCDE":
+        monkeypatch.delenv(key, raising=False)
+    load_dotenv(env)
+    import os
+    assert [os.environ[k] for k in "ABCDE"] == ["value", "quoted # not a comment", "x", "no#comment", "e"]

@@ -163,7 +163,9 @@ def test_command_line_quoting(argv, windows, expected):
     assert menu.command_line("./run.sh", argv, windows=windows) == expected
 
 
-@pytest.mark.parametrize("value", ['сказал "да"', "бюджет $200", "R&D", "a|b", "`cmd`", "50%"])
+@pytest.mark.parametrize("value", [
+    'сказал "да"', "бюджет $200", "R&D", "a|b", "`cmd`", "50%", "бот „Авито“", "см. “ТЗ”", "C:\\dir\\",
+])
 def test_no_windows_hint_for_values_shells_disagree_on(value):
     # для cmd и PowerShell нет общей записи — лучше не показывать, чем показать неверную
     assert menu.command_line(".\\run.bat", ["check", "--", value], windows=True) is None
