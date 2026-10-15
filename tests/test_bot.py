@@ -471,3 +471,19 @@ def test_kwork_error_in_chat_has_bot_advice(make_bot):
     bot.step()
     warning = [t for t in api.texts() if "Не получилось" in t][0]
     assert "--from-file" not in warning and "KWORK_COOKIE" in warning and "перезапустите бота" in warning
+
+
+def test_unexpected_fetch_error_does_not_kill_the_bot(make_bot):
+    def broken():
+        raise OSError("Could not find a suitable TLS CA certificate bundle")
+
+    logs = []
+    bot, api = make_bot(fetch=broken)
+    bot.log = logs.append
+    api.updates = [message(OWNER, "/start")]
+    bot.step()  # не падает
+    assert any("Ошибка при проверке Kwork" in line for line in logs)
+    bot.time["t"] = 10_000
+    api.updates = [message(OWNER, "/settings")]
+    bot.step()
+    assert "Настройки" in api.texts()[-1]

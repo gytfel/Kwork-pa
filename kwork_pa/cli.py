@@ -371,8 +371,31 @@ def cmd_bot(args: argparse.Namespace) -> int:
         bot.run()
     except BotStopped as exc:
         print(f"Ошибка: {exc}", file=sys.stderr)
-        return 1
+        return 3 if exc.fatal else 1  # 3 — служба на сервере не станет перезапускать бота впустую
     return 0
+
+
+# --- VPS -------------------------------------------------------------------------------
+
+def cmd_deploy(args: argparse.Namespace) -> int:
+    from .deploy import ROOT, DeployError, deploy
+
+    if not (ROOT / "deploy" / "install.sh").is_file():
+        print("Установщик не найден: запускайте эту команду из папки проекта — ./run.sh deploy … "
+              "(Windows: .\\run.bat deploy …)", file=sys.stderr)
+        return 2
+    try:
+        return deploy(
+            args.target,
+            port=args.port,
+            identity=args.identity,
+            include_env=not args.no_env,
+            replace_env=args.replace_env,
+            start=not args.no_start,
+        )
+    except DeployError as exc:
+        print(f"Ошибка: {exc}", file=sys.stderr)
+        return 1
 
 
 # --- check ---------------------------------------------------------------------------
@@ -451,6 +474,15 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--ai", choices=MODES, help=AI_HELP)
     b.add_argument("--state", default="results/telegram_bot.json", help="где хранить настройки бота")
     b.set_defaults(func=cmd_bot)
+
+    d = sub.add_parser("deploy", help="установить бота на VPS-сервер по SSH (работает круглосуточно)")
+    d.add_argument("target", help="сервер в виде user@IP (просто IP — значит root@IP)")
+    d.add_argument("--port", type=int, default=22, help="SSH-порт (по умолчанию 22)")
+    d.add_argument("--identity", "-i", help="SSH-ключ, если вход по ключу из нестандартного файла")
+    d.add_argument("--no-env", action="store_true", help="не копировать ваш .env на сервер")
+    d.add_argument("--replace-env", action="store_true", help="заменить .env, который уже есть на сервере")
+    d.add_argument("--no-start", action="store_true", help="только установить, не запускать")
+    d.set_defaults(func=cmd_deploy)
     return parser
 
 

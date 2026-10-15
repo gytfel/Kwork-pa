@@ -1,4 +1,6 @@
 import json
+
+import pytest
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -315,5 +317,19 @@ def test_cli_bot_warns_about_non_numeric_chat_id(monkeypatch, capsys):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:abc")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "@my_channel")
     monkeypatch.setattr(bot_module.KworkBot, "run", fake_run)
-    assert main(["bot", "--state", "/nonexistent-dir-for-test/bot.json"]) == 1
+    assert main(["bot", "--state", "/nonexistent-dir-for-test/bot.json"]) == 3
     assert "это не номер чата" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("fatal,code", [(True, 3), (False, 1)])
+def test_cli_bot_exit_codes_for_systemd(monkeypatch, fatal, code):
+    # 3 — служба не перезапускает (неверный токен), 1 — перезапустит (сеть ещё не поднялась)
+    from kwork_pa import bot as bot_module
+
+    def fake_run(self):
+        raise bot_module.BotStopped("stop", fatal=fatal)
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:abc")
+    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+    monkeypatch.setattr(bot_module.KworkBot, "run", fake_run)
+    assert main(["bot", "--state", "/nonexistent-dir-for-test/bot.json"]) == code

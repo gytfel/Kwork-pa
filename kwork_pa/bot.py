@@ -50,7 +50,12 @@ class TelegramError(RuntimeError):
 
 
 class BotStopped(RuntimeError):
-    """Работать дальше бессмысленно: неверный токен или бот уже запущен в другом месте."""
+    """Бот остановился. fatal=True — перезапуск не поможет (неверный токен, бот уже запущен
+    в другом месте); fatal=False — временная беда (нет сети), служба на сервере перезапустит бота."""
+
+    def __init__(self, message: str, fatal: bool = True) -> None:
+        super().__init__(message)
+        self.fatal = fatal
 
 
 def mask_token(text: str) -> str:
@@ -222,7 +227,7 @@ class KworkBot:
         try:
             username = self.start()
         except TelegramError as exc:
-            raise self._fatal(exc) or BotStopped(f"Telegram недоступен: {exc}") from exc
+            raise self._fatal(exc) or BotStopped(f"Telegram недоступен: {exc}", fatal=False) from exc
         link = f"https://t.me/{username}" if username else "вашего бота"
         if self.state.owner is None:
             self.log(f"Бот запущен. Откройте {link} в Telegram и нажмите «Старт» (/start).")
@@ -270,7 +275,10 @@ class KworkBot:
         if updates:
             self.save()
         if self.active and self.clock() >= self.next_check:
-            self.check_kwork()
+            try:
+                self.check_kwork()
+            except Exception as exc:  # бот на сервере должен работать дальше при любой неожиданной ошибке
+                self.log(f"Ошибка при проверке Kwork: {exc!r}")
             self.next_check = self.clock() + self.state.settings.interval_min * 60
 
     # --- входящие ---------------------------------------------------------------------

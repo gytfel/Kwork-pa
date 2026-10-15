@@ -27,6 +27,7 @@ Kwork-pa — заказы и клиенты, с которыми справит�
   3. Найти клиентов в 2ГИС
   4. Проверить текст задачи
   5. Запустить Telegram-бота (заказы в телефон)
+  6. Установить бота на VPS-сервер (работает круглосуточно)
   0. Выход
 """
 
@@ -223,12 +224,33 @@ def bot_args() -> list[str] | None:
     return ["bot"]
 
 
+def deploy_args() -> list[str] | None:
+    print("Бот будет работать на сервере круглосуточно, даже когда компьютер выключен.")
+    print("Нужен VPS с Ubuntu 22.04+ или Debian 12+ и доступ по SSH: IP-адрес, логин и пароль")
+    print("(или ключ) — их присылает хостер после покупки сервера.")
+    target = ask("Адрес сервера: логин@IP, например root@203.0.113.10 (Enter — назад в меню)")
+    if not target:
+        return None
+    argv = ["deploy", target]
+    port = ask_int("SSH-порт", 22, minimum=1)
+    if port != 22:
+        argv += ["--port", str(port)]
+    if Path(".env").is_file():
+        if not ask_yes("Скопировать на сервер ваши настройки из .env (токен бота, ключи)?", True):
+            argv.append("--no-env")
+    else:
+        print("  Файла .env нет — токен бота установщик спросит прямо на сервере.")
+    print("  Пароль от сервера могут спросить дважды: при копировании и при установке.")
+    return argv
+
+
 ACTIONS: dict[str, Callable[[], list[str] | None]] = {
     "1": kwork_args,
     "2": watch_args,
     "3": leads_args,
     "4": check_args,
     "5": bot_args,
+    "6": deploy_args,
 }
 
 

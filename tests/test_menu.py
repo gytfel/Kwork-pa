@@ -276,3 +276,19 @@ def test_program_name(monkeypatch, env, argv0, expected):
     monkeypatch.setattr("sys.argv", [argv0])
     assert cli.program_name() == expected
     assert cli.build_parser().prog == expected
+
+
+def test_deploy_asks_address_port_and_env(answers, clean_env):
+    (clean_env / ".env").write_text("TELEGRAM_BOT_TOKEN=1:x\n", encoding="utf-8")
+    answers("6", "root@203.0.113.10", "2222", "н", "0")
+    assert run_menu() == [["deploy", "root@203.0.113.10", "--port", "2222", "--no-env"]]
+
+
+def test_deploy_defaults(answers, clean_env):
+    answers("6", "admin@vps", "", "0")
+    assert run_menu() == [["deploy", "admin@vps"]]
+
+
+def test_deploy_empty_address_goes_back(answers, clean_env):
+    answers("6", "", "0")
+    assert run_menu() == []
