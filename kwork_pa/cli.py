@@ -8,6 +8,8 @@ import sys
 import time
 from pathlib import Path
 
+import requests
+
 from . import report
 from .capability import DEFAULT_MIN_SCORE, classify
 from .kwork import KworkClient, KworkError, Project, load_projects_file
@@ -28,7 +30,8 @@ def load_dotenv(path: str | Path = ".env") -> None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip().strip("'\""))
+        key = key.strip().removeprefix("export ").strip()
+        os.environ.setdefault(key, value.strip().strip("'\""))
 
 
 def _formats(value: str) -> set[str]:
@@ -41,6 +44,31 @@ def _formats(value: str) -> set[str]:
 
 def _money(value: int | None) -> str:
     return f"{value:,}".replace(",", " ") + " ₽" if value else "без бюджета"
+
+
+def program_name() -> str:
+    """Как пользователь запускает программу — для справки и подсказок меню."""
+    launcher = os.environ.get("KWORK_PA_PROG")  # задают run.sh и run.bat
+    if launcher:
+        return launcher
+    script = Path(sys.argv[0]).name
+    if script in ("__main__.py", "-c", ""):
+        return "python -m kwork_pa"
+    return Path(script).stem  # kwork-pa после pip/pipx install
+
+
+def _save_report(out: str, rows: list[dict], markdown: str, formats: set[str]) -> None:
+    try:
+        written = report.save(out, rows, markdown, formats)
+    except OSError as exc:
+        print(
+            f"\nНе удалось сохранить отчёт: {exc}\n"
+            "Если файл открыт в Excel — закройте его и запустите ещё раз.",
+            file=sys.stderr,
+        )
+        return
+    if written:
+        print("\nСохранено: " + ", ".join(str(p) for p in written))
 
 
 # --- kwork ---------------------------------------------------------------------------
@@ -166,21 +194,18 @@ def cmd_kwork(args: argparse.Namespace) -> int:
             _print_project(project)
 
         if selected:
-            written = report.save(
-                args.out,
-                [p.to_row() for p in selected],
-                report.projects_markdown(selected),
-                args.format,
-            )
-            if written:
-                print("\nСохранено: " + ", ".join(str(p) for p in written))
+            _save_report(args.out, [p.to_row() for p in selected], report.projects_markdown(selected), args.format)
 
         if telegram:
             from .notify import format_project, send_telegram
 
             for project in selected:
                 if project.verdict and project.verdict.ok:
-                    send_telegram(*telegram, format_project(project))
+                    try:
+                        send_telegram(*telegram, format_project(project))
+                    except requests.RequestException as exc:
+                        print(f"Telegram: не удалось отправить ({exc})", file=sys.stderr)
+                        break
 
         if seen is not None:
             for project in projects:
@@ -257,14 +282,7 @@ def cmd_leads(args: argparse.Namespace) -> int:
         print(f"      Предложить: {'; '.join(lead.services)}")
 
     if selected:
-        written = report.save(
-            args.out,
-            [lead.to_row() for lead in selected],
-            report.leads_markdown(selected),
-            args.format,
-        )
-        if written:
-            print("\nСохранено: " + ", ".join(str(p) for p in written))
+        _save_report(args.out, [lead.to_row() for lead in selected], report.leads_markdown(selected), args.format)
     return 0
 
 
@@ -281,7 +299,7 @@ def cmd_check(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="python -m kwork_pa",
+        prog=program_name(),
         description="Поиск заказов на Kwork и клиентов в 2ГИС, с которыми справится Claude.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
@@ -338,16 +356,24 @@ def run(argv: list[str]) -> int:
         return 130
 
 
+def _utf8_output() -> None:
+    # На Windows вывод в файл/конвейер по умолчанию в cp1251, и «₽» роняет программу.
+    for stream in (sys.stdout, sys.stderr):
+        if stream is not None and hasattr(stream, "reconfigure") and not stream.isatty():
+            stream.reconfigure(encoding="utf-8")
+
+
 def main(argv: list[str] | None = None) -> int:
+    _utf8_output()
     load_dotenv()
     if argv is None:
         argv = sys.argv[1:]
     if not argv:
         # без аргументов: в терминале — меню, иначе (cron, перенаправление) — справка
-        if sys.stdin.isatty():
+        if sys.stdin is not None and sys.stdin.isatty():
             from .menu import interactive
 
-            return interactive(run)
+            return interactive(run, program_name())
         build_parser().print_help()
         return 2
     return run(argv)

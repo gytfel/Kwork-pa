@@ -11,6 +11,11 @@ import shlex
 from pathlib import Path
 from typing import Callable
 
+try:  # стрелки и история в input() на Linux/macOS; в консоли Windows это и так есть
+    import readline
+except ImportError:
+    readline = None
+
 Runner = Callable[[list[str]], int]
 
 MENU = """
@@ -22,6 +27,28 @@ Kwork-pa — заказы и клиенты, с которыми справит�
   4. Проверить текст задачи
   0. Выход
 """
+
+_SAFE_CHARS = set("_./:=,+-@")
+
+
+def quote_arg(arg: str, windows: bool | None = None) -> str:
+    """Кавычки только там, где они нужны, — в формате текущей ОС.
+
+    shlex.quote не годится для Windows (cmd не понимает одинарные кавычки) и
+    без нужды берёт в кавычки любое слово на кириллице.
+    """
+    if windows is None:
+        windows = os.name == "nt"
+    if arg and all(ch.isalnum() or ch in _SAFE_CHARS for ch in arg):
+        return arg
+    if windows:
+        return '"' + arg.replace('"', '\\"') + '"'
+    return shlex.quote(arg)
+
+
+def command_line(prog: str, argv: list[str], windows: bool | None = None) -> str:
+    prog_part = prog if " " not in prog or prog.startswith("python -m") else quote_arg(prog, windows)
+    return " ".join([prog_part, *(quote_arg(a, windows) for a in argv)])
 
 
 def ask(prompt: str, default: str = "") -> str:
@@ -53,9 +80,13 @@ def ask_yes(prompt: str, default: bool = False) -> bool:
     return answer[0] in ("д", "y", "l")
 
 
+def _env_key(line: str) -> str:
+    return line.split("=", 1)[0].strip().removeprefix("export ").strip() if "=" in line else ""
+
+
 def save_to_env(key: str, value: str, path: Path = Path(".env")) -> None:
     lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
-    lines = [line for line in lines if not line.strip().startswith(f"{key}=")]
+    lines = [line for line in lines if _env_key(line) != key]
     lines.append(f"{key}={value}")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     os.environ[key] = value
@@ -102,9 +133,9 @@ def leads_args() -> list[str] | None:
             save_to_env("DGIS_API_KEY", key)
         else:
             os.environ["DGIS_API_KEY"] = key
-    city = ""
-    while not city:
-        city = ask("Город")
+    city = ask("Город (Enter — назад в меню)")
+    if not city:
+        return None
     argv = ["leads", "--city", city]
     niches = ask("Сферы бизнеса через запятую (Enter — популярные ниши)")
     for niche in niches.split(","):
@@ -118,8 +149,22 @@ def leads_args() -> list[str] | None:
 
 
 def check_args() -> list[str] | None:
-    text = ask("Текст задачи (Enter — назад в меню)")
-    return ["check", text] if text else None
+    print("Вставьте текст задачи: первая строка — заголовок, дальше — описание.")
+    print("В конце — строка с одной точкой «.» и Enter. Пустой ввод — назад в меню.")
+    lines: list[str] = []
+    while True:
+        try:
+            line = input("> " if not lines else "  ")
+        except EOFError:
+            break
+        if line.strip() == ".":
+            break
+        if not lines and not line.strip():
+            return None
+        lines.append(line)
+    text = "\n".join(lines).strip()
+    # «--», чтобы текст, начинающийся с «-», не принимался за параметр
+    return ["check", "--", text] if text else None
 
 
 ACTIONS: dict[str, Callable[[], list[str] | None]] = {
@@ -130,27 +175,41 @@ ACTIONS: dict[str, Callable[[], list[str] | None]] = {
 }
 
 
-def interactive(run: Runner) -> int:
+def interactive(run: Runner, prog: str = "python -m kwork_pa") -> int:
     while True:
         print(MENU)
         try:
-            choice = ask("Выберите пункт", "1")
-            if choice in ("0", "q", "й", "выход", "exit"):
-                return 0
-            builder = ACTIONS.get(choice)
-            if builder is None:
-                print("Нет такого пункта.")
-                continue
-            argv = builder()
+            choice = ask("Выберите пункт")
         except (EOFError, KeyboardInterrupt):
+            print()
+            return 0
+        if not choice:
+            continue
+        if choice in ("0", "q", "й", "выход", "exit"):
+            return 0
+        builder = ACTIONS.get(choice)
+        if builder is None:
+            print("Нет такого пункта.")
+            continue
+        try:
+            argv = builder()
+        except KeyboardInterrupt:  # Ctrl+C посреди вопросов — назад в меню
+            print()
+            continue
+        except EOFError:
             print()
             return 0
         if argv is None:
             continue
 
-        print("\nТо же самое одной командой:\n  python -m kwork_pa " + shlex.join(argv) + "\n")
+        if not any("\n" in arg for arg in argv):
+            print("\nТо же самое одной командой:\n  " + command_line(prog, argv) + "\n")
         try:
             run(argv)
         except SystemExit:  # argparse уже напечатал, что не так
             pass
+        except KeyboardInterrupt:
+            print()
+        except Exception as exc:  # меню не должно закрываться из-за ошибки одной команды
+            print(f"\nОшибка: {exc}")
         print("\n" + "─" * 60)

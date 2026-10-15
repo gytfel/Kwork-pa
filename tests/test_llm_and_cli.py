@@ -102,3 +102,42 @@ def test_fallback_only_for_supported_models():
     ClaudeJudge(model="claude-haiku-5-5", client=client).pitch_for_lead(evaluate(Company(id="1", name="x")))
     assert "fallbacks" not in messages.requests[0]
     assert "betas" not in messages.requests[0]
+
+
+def test_cli_report_locked_file_is_reported_not_crashing(tmp_path, capsys):
+    out = tmp_path / "kwork"
+    out.with_suffix(".csv").mkdir()  # как файл, который не открыть на запись (открыт в Excel)
+    code = main(["kwork", "--from-file", str(FIXTURES / "kwork_projects.json"), "--out", str(out)])
+    assert code == 0
+    assert "Не удалось сохранить отчёт" in capsys.readouterr().err
+
+
+def test_cli_telegram_failure_does_not_crash(tmp_path, capsys, monkeypatch):
+    import requests
+
+    def broken_send(*args, **kwargs):
+        raise requests.ConnectionError("no route")
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "t")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "c")
+    monkeypatch.setattr("kwork_pa.notify.send_telegram", broken_send)
+    code = main([
+        "kwork", "--from-file", str(FIXTURES / "kwork_projects.json"), "--telegram",
+        "--out", str(tmp_path / "r"), "--format", "json",
+    ])
+    assert code == 0
+    assert "Telegram: не удалось отправить" in capsys.readouterr().err
+
+
+def test_redirected_output_is_utf8(tmp_path):
+    import subprocess
+    import sys
+
+    env = {"PYTHONIOENCODING": "cp1251", "PATH": "", "SYSTEMROOT": ""}
+    result = subprocess.run(
+        [sys.executable, "-m", "kwork_pa", "kwork", "--from-file", str(FIXTURES / "kwork_projects.json"),
+         "--out", str(tmp_path / "r"), "--format", "json"],
+        capture_output=True, env=env, cwd=Path(__file__).parent.parent,
+    )
+    assert result.returncode == 0, result.stderr.decode("utf-8", "replace")
+    assert "₽" in result.stdout.decode("utf-8")

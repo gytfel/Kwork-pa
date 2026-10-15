@@ -1,4 +1,5 @@
 import builtins
+import os
 
 import pytest
 
@@ -22,7 +23,7 @@ def answers(monkeypatch):
 
 @pytest.fixture
 def clean_env(monkeypatch, tmp_path):
-    for key in ("ANTHROPIC_API_KEY", "DGIS_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"):
+    for key in ("ANTHROPIC_API_KEY", "DGIS_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "KWORK_PA_PROG"):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.chdir(tmp_path)
     return tmp_path
@@ -63,7 +64,7 @@ def test_watch_with_telegram(answers, clean_env, monkeypatch):
 
 
 def test_leads_asks_and_saves_key(answers, clean_env, monkeypatch):
-    answers("3", "my-key", "", "", "Казань", "кафе, барбершоп", "", "0")
+    answers("3", "my-key", "", "Казань", "кафе, барбершоп", "", "0")
     assert run_menu() == [[
         "leads", "--city", "Казань", "--query", "кафе", "--query", "барбершоп", "--audit",
     ]]
@@ -75,29 +76,84 @@ def test_leads_without_key_goes_back(answers, clean_env):
     assert run_menu() == []
 
 
+def test_leads_empty_city_goes_back(answers, clean_env, monkeypatch):
+    monkeypatch.setenv("DGIS_API_KEY", "k")
+    answers("3", "", "0")
+    assert run_menu() == []
+
+
+def test_ctrl_c_inside_questions_returns_to_menu(clean_env, monkeypatch):
+    queue = ["1", KeyboardInterrupt, "4", "задача", ".", "0"]
+
+    def fake_input(prompt=""):
+        item = queue.pop(0)
+        if item is KeyboardInterrupt:
+            raise KeyboardInterrupt
+        return item
+
+    monkeypatch.setattr(builtins, "input", fake_input)
+    assert run_menu() == [["check", "--", "задача"]]
+
+
+def test_empty_choice_redraws_menu_instead_of_searching(answers, clean_env):
+    answers("", "", "0")
+    assert run_menu() == []
+
+
 def test_save_to_env_replaces_existing_key(clean_env, monkeypatch):
     env = clean_env / ".env"
-    env.write_text("# comment\nDGIS_API_KEY=old\nOTHER=1\n", encoding="utf-8")
+    env.write_text("# comment\nDGIS_API_KEY=old\nexport DGIS_API_KEY = older\nOTHER=1", encoding="utf-8")
     menu.save_to_env("DGIS_API_KEY", "new", env)
     monkeypatch.delenv("DGIS_API_KEY")
     assert env.read_text(encoding="utf-8") == "# comment\nOTHER=1\nDGIS_API_KEY=new\n"
+    cli.load_dotenv(env)
+    assert os.environ["DGIS_API_KEY"] == "new"
 
 
 def test_check_and_unknown_choice(answers, clean_env):
-    answers("9", "4", "Парсер на Python", "")
-    assert run_menu() == [["check", "Парсер на Python"]]
+    answers("9", "4", "Парсер на Python", ".", "0")
+    assert run_menu() == [["check", "--", "Парсер на Python"]]
 
 
-def test_runner_errors_return_to_menu(answers, clean_env):
-    answers("4", "задача", "0")
+def test_check_reads_pasted_multiline_text(answers, clean_env):
+    answers("4", "Нужен парсер сайта", "", "Собрать товары в Excel.", "-Бюджет обсуждается.", ".", "0")
+    assert run_menu() == [[
+        "check", "--", "Нужен парсер сайта\n\nСобрать товары в Excel.\n-Бюджет обсуждается.",
+    ]]
+
+
+def test_check_ends_on_eof(answers, clean_env):
+    answers("4", "Парсер")
+    assert run_menu() == [["check", "--", "Парсер"]]
+
+
+@pytest.mark.parametrize("error", [SystemExit(2), RuntimeError("boom"), PermissionError("results/kwork.csv"), KeyboardInterrupt()])
+def test_runner_errors_return_to_menu(answers, clean_env, capsys, error):
+    answers("4", "задача", ".", "4", "ещё", ".", "0")
     calls = []
 
     def failing_run(argv):
         calls.append(argv)
-        raise SystemExit(2)
+        raise error
 
     assert menu.interactive(failing_run) == 0
-    assert calls == [["check", "задача"]]
+    assert len(calls) == 2  # меню пережило ошибку и запустило вторую команду
+
+
+@pytest.mark.parametrize("argv,windows,expected", [
+    (["kwork", "--keyword", "парсер"], False, "./run.sh kwork --keyword парсер"),
+    (["leads", "--city", "Нижний Новгород"], False, "./run.sh leads --city 'Нижний Новгород'"),
+    (["leads", "--city", "Нижний Новгород"], True, './run.sh leads --city "Нижний Новгород"'),
+    (["kwork", "--keyword", "a&b"], True, './run.sh kwork --keyword "a&b"'),
+    (["check", "--", 'сказал "да"'], True, './run.sh check -- "сказал \\"да\\""'),
+])
+def test_command_line_quoting(argv, windows, expected):
+    assert menu.command_line("./run.sh", argv, windows=windows) == expected
+
+
+def test_command_line_quotes_prog_with_spaces():
+    assert menu.command_line("./my dir/run.sh", ["check"], windows=False) == "'./my dir/run.sh' check"
+    assert menu.command_line("python -m kwork_pa", ["check"], windows=False) == "python -m kwork_pa check"
 
 
 def test_main_without_args_shows_help_when_not_a_tty(monkeypatch, capsys):
@@ -108,8 +164,28 @@ def test_main_without_args_shows_help_when_not_a_tty(monkeypatch, capsys):
 
 def test_main_without_args_opens_menu_in_terminal(monkeypatch, answers, clean_env, capsys):
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
-    answers("4", "Написать парсер на Python", "0")
+    monkeypatch.setenv("KWORK_PA_PROG", "./run.sh")
+    answers("4", "Написать парсер на Python", ".", "0")
     assert cli.main([]) == 0
     out = capsys.readouterr().out
-    assert "python -m kwork_pa check 'Написать парсер на Python'" in out
+    expected = menu.command_line("./run.sh", ["check", "--", "Написать парсер на Python"])
+    assert expected in out
     assert "ПОДХОДИТ" in out
+
+
+@pytest.mark.parametrize("env,argv0,expected", [
+    ("./run.sh", "/x/kwork_pa/__main__.py", "./run.sh"),
+    (None, "/x/kwork_pa/__main__.py", "python -m kwork_pa"),
+    (None, "/home/u/.local/bin/kwork-pa", "kwork-pa"),
+    (None, "C:\\Users\\u\\.local\\bin\\kwork-pa.exe", "kwork-pa"),
+])
+def test_program_name(monkeypatch, env, argv0, expected):
+    if env:
+        monkeypatch.setenv("KWORK_PA_PROG", env)
+    else:
+        monkeypatch.delenv("KWORK_PA_PROG", raising=False)
+    if os.sep == "/":  # пути Windows разбираются только на Windows
+        argv0 = argv0.replace("\\", "/")
+    monkeypatch.setattr("sys.argv", [argv0])
+    assert cli.program_name() == expected
+    assert cli.build_parser().prog == expected

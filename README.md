@@ -16,18 +16,20 @@
 
 Нужен Python 3.10 или новее ([python.org](https://www.python.org/downloads/); на Windows при
 установке отметьте «Add python.exe to PATH»). Скачайте проект (`git clone` или
-Code → Download ZIP) и запустите лаунчер из папки проекта:
+Code → Download ZIP, затем распакуйте архив) и запустите лаунчер из папки проекта:
 
 ```bash
 # Linux / macOS
 ./run.sh
 
 # Windows: двойной клик по run.bat или в cmd / PowerShell
-run.bat
+.\run.bat
 ```
 
 При первом запуске лаунчер сам создаст окружение `.venv` и поставит зависимости.
-Это займёт минуту. Потом откроется меню:
+Это займёт минуту. Если Python установлен под другим именем (например, в системе старый
+`python3`, а рядом стоит `python3.12`), укажите его явно: `PYTHON=python3.12 ./run.sh`.
+Потом откроется меню:
 
 ```
   1. Найти заказы на Kwork
@@ -41,23 +43,37 @@ run.bat
 самое без меню. Любую команду из этого README можно передать лаунчеру напрямую:
 
 ```bash
-./run.sh kwork --min-price 3000 --llm      # Windows: run.bat kwork --min-price 3000 --llm
+./run.sh kwork --min-price 3000 --llm      # Windows: .\run.bat kwork --min-price 3000 --llm
 ```
+
+В примерах ниже вместо `python -m kwork_pa` пишите `./run.sh` (Windows: `.\run.bat`), если
+пользуетесь лаунчером.
 
 Ключи (2ГИС, Claude API, Telegram) лежат в файле `.env`: скопируйте `.env.example` в
 `.env` и заполните. Ключ 2ГИС меню спросит само и предложит сохранить.
 
 ### Команда `kwork-pa`
 
-Чтобы запускать без лаунчера, из любой папки:
+Чтобы запускать без лаунчера, из любой папки, поставьте проект через
+[pipx](https://pipx.pypa.io): он создаст для программы отдельное окружение и добавит
+команду `kwork-pa` в PATH.
 
 ```bash
-pipx install .        # или: pip install .
-kwork-pa              # меню
+# один раз поставить pipx
+sudo apt install pipx            # Debian/Ubuntu
+brew install pipx                # macOS
+py -m pip install --user pipx    # Windows
+pipx ensurepath                  # Windows: py -m pipx ensurepath; затем откройте новый терминал
+
+# из папки проекта
+pipx install .
+kwork-pa                         # меню
 kwork-pa kwork --keyword парсер
 ```
 
-`.env` и папка `results/` в этом случае берутся из текущей папки.
+`.env` и папка `results/` в этом случае берутся из текущей папки. Обычный `pip install .`
+тоже работает, но только внутри активированного виртуального окружения: системный Python
+в свежих Ubuntu, Debian и Homebrew не даёт ставить в него пакеты.
 
 ### Вручную
 
