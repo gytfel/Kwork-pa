@@ -196,20 +196,25 @@ def cmd_kwork(args: argparse.Namespace) -> int:
         if selected:
             _save_report(args.out, [p.to_row() for p in selected], report.projects_markdown(selected), args.format)
 
+        undelivered: set[int] = set()
         if telegram:
             from .notify import format_project, send_telegram
 
-            for project in selected:
-                if project.verdict and project.verdict.ok:
-                    try:
-                        send_telegram(*telegram, format_project(project))
-                    except requests.RequestException as exc:
-                        print(f"Telegram: не удалось отправить ({exc})", file=sys.stderr)
-                        break
+            pending = [p for p in selected if p.verdict and p.verdict.ok]
+            for i, project in enumerate(pending):
+                try:
+                    send_telegram(*telegram, format_project(project))
+                except requests.RequestException as exc:
+                    reason = str(exc).replace(telegram[0], "***")  # токен бота виден в URL
+                    print(f"Telegram: не удалось отправить ({reason})", file=sys.stderr)
+                    # не помечаем как просмотренные — в --watch отправим в следующий раз
+                    undelivered = {p.id for p in pending[i:]}
+                    break
 
         if seen is not None:
             for project in projects:
-                seen.add(project.id)
+                if project.id not in undelivered:
+                    seen.add(project.id)
             seen.save()
 
         if not args.watch:

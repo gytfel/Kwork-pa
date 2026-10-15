@@ -127,6 +127,16 @@ def test_check_ends_on_eof(answers, clean_env):
     assert run_menu() == [["check", "--", "Парсер"]]
 
 
+def test_check_skips_leading_blank_lines_of_paste(answers, clean_env):
+    answers("4", "", "  ", "Нужен парсер сайта", "Собрать товары", ".", "0")
+    assert run_menu() == [["check", "--", "Нужен парсер сайта\nСобрать товары"]]
+
+
+def test_check_dot_alone_goes_back(answers, clean_env):
+    answers("4", ".", "0")
+    assert run_menu() == []
+
+
 @pytest.mark.parametrize("error", [SystemExit(2), RuntimeError("boom"), PermissionError("results/kwork.csv"), KeyboardInterrupt()])
 def test_runner_errors_return_to_menu(answers, clean_env, capsys, error):
     answers("4", "задача", ".", "4", "ещё", ".", "0")
@@ -144,15 +154,29 @@ def test_runner_errors_return_to_menu(answers, clean_env, capsys, error):
     (["kwork", "--keyword", "парсер"], False, "./run.sh kwork --keyword парсер"),
     (["leads", "--city", "Нижний Новгород"], False, "./run.sh leads --city 'Нижний Новгород'"),
     (["leads", "--city", "Нижний Новгород"], True, './run.sh leads --city "Нижний Новгород"'),
-    (["kwork", "--keyword", "a&b"], True, './run.sh kwork --keyword "a&b"'),
-    (["check", "--", 'сказал "да"'], True, './run.sh check -- "сказал \\"да\\""'),
+    (["kwork", "--keyword", "@user"], False, "./run.sh kwork --keyword @user"),
+    (["kwork", "--keyword", "@user"], True, './run.sh kwork --keyword "@user"'),
+    (["check", "--", "it's $HOME"], False, "./run.sh check -- 'it'\"'\"'s $HOME'"),
+    (["kwork", "--keyword", "a&b"], False, "./run.sh kwork --keyword 'a&b'"),
 ])
 def test_command_line_quoting(argv, windows, expected):
     assert menu.command_line("./run.sh", argv, windows=windows) == expected
 
 
-def test_command_line_quotes_prog_with_spaces():
-    assert menu.command_line("./my dir/run.sh", ["check"], windows=False) == "'./my dir/run.sh' check"
+@pytest.mark.parametrize("value", ['сказал "да"', "бюджет $200", "R&D", "a|b", "`cmd`", "50%"])
+def test_no_windows_hint_for_values_shells_disagree_on(value):
+    # для cmd и PowerShell нет общей записи — лучше не показывать, чем показать неверную
+    assert menu.command_line(".\\run.bat", ["check", "--", value], windows=True) is None
+
+
+def test_no_hint_for_multiline_text():
+    assert menu.command_line("./run.sh", ["check", "--", "a\nb"], windows=False) is None
+
+
+def test_command_line_uses_prog_verbatim():
+    # лаунчер сам берёт свой путь в кавычки, меню его не трогает
+    assert menu.command_line("'./my dir/run.sh'", ["check"], windows=False) == "'./my dir/run.sh' check"
+    assert menu.command_line("sh ./run.sh", ["check"], windows=False) == "sh ./run.sh check"
     assert menu.command_line("python -m kwork_pa", ["check"], windows=False) == "python -m kwork_pa check"
 
 

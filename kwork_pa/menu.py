@@ -28,7 +28,10 @@ Kwork-pa — заказы и клиенты, с которыми справит�
   0. Выход
 """
 
-_SAFE_CHARS = set("_./:=,+-@")
+_SAFE_CHARS = set("_./:=,+-")
+# Символы, которые нельзя одинаково записать для cmd и PowerShell сразу:
+# с ними подсказку на Windows не показываем (сам запуск из меню работает).
+_WINDOWS_UNSAFE = set('"$`&|<>^%')
 
 
 def quote_arg(arg: str, windows: bool | None = None) -> str:
@@ -46,9 +49,18 @@ def quote_arg(arg: str, windows: bool | None = None) -> str:
     return shlex.quote(arg)
 
 
-def command_line(prog: str, argv: list[str], windows: bool | None = None) -> str:
-    prog_part = prog if " " not in prog or prog.startswith("python -m") else quote_arg(prog, windows)
-    return " ".join([prog_part, *(quote_arg(a, windows) for a in argv)])
+def command_line(prog: str, argv: list[str], windows: bool | None = None) -> str | None:
+    """Команда для копирования в терминал или None, если её не записать надёжно.
+
+    prog уже готов к вставке: лаунчеры сами берут свой путь в кавычки.
+    """
+    if windows is None:
+        windows = os.name == "nt"
+    if any("\n" in arg for arg in argv):
+        return None
+    if windows and any(_WINDOWS_UNSAFE & set(arg) for arg in argv):
+        return None
+    return " ".join([prog, *(quote_arg(a, windows) for a in argv)])
 
 
 def ask(prompt: str, default: str = "") -> str:
@@ -150,7 +162,7 @@ def leads_args() -> list[str] | None:
 
 def check_args() -> list[str] | None:
     print("Вставьте текст задачи: первая строка — заголовок, дальше — описание.")
-    print("В конце — строка с одной точкой «.» и Enter. Пустой ввод — назад в меню.")
+    print("В конце — строка с одной точкой «.» и Enter. Только «.» — назад в меню.")
     lines: list[str] = []
     while True:
         try:
@@ -160,7 +172,7 @@ def check_args() -> list[str] | None:
         if line.strip() == ".":
             break
         if not lines and not line.strip():
-            return None
+            continue  # скопированный текст часто начинается с пустой строки
         lines.append(line)
     text = "\n".join(lines).strip()
     # «--», чтобы текст, начинающийся с «-», не принимался за параметр
@@ -202,8 +214,9 @@ def interactive(run: Runner, prog: str = "python -m kwork_pa") -> int:
         if argv is None:
             continue
 
-        if not any("\n" in arg for arg in argv):
-            print("\nТо же самое одной командой:\n  " + command_line(prog, argv) + "\n")
+        hint = command_line(prog, argv)
+        if hint:
+            print("\nТо же самое одной командой:\n  " + hint + "\n")
         try:
             run(argv)
         except SystemExit:  # argparse уже напечатал, что не так

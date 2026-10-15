@@ -146,7 +146,8 @@ class DgisClient:
                 timeout=30,
             )
         except requests.RequestException as exc:
-            raise DgisError(f"нет связи с 2ГИС API: {exc}") from exc
+            reason = str(exc).replace(self.api_key, "***")  # ключ виден в URL запроса
+            raise DgisError(f"нет связи с 2ГИС API: {reason}") from exc
         try:
             data = resp.json()
         except ValueError as exc:
@@ -157,7 +158,7 @@ class DgisClient:
             return {"items": [], "total": 0}
         if code != 200:
             message = (meta.get("error") or {}).get("message") or resp.text[:200]
-            raise DgisError(f"2ГИС API {code}: {message}")
+            raise DgisError(f"2ГИС API {code}: {message.replace(self.api_key, '***')}")
         return data.get("result") or {}
 
     def find_region(self, city: str) -> str | None:

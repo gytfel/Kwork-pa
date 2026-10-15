@@ -141,3 +141,30 @@ def test_redirected_output_is_utf8(tmp_path):
     )
     assert result.returncode == 0, result.stderr.decode("utf-8", "replace")
     assert "₽" in result.stdout.decode("utf-8")
+
+
+def test_telegram_failure_hides_token_and_keeps_projects_unseen(tmp_path, capsys, monkeypatch):
+    import requests
+
+    token = "123456:SECRETTOKEN"
+
+    def broken_send(tok, chat, text, session=None):
+        raise requests.ConnectionError(f"Max retries exceeded with url: /bot{tok}/sendMessage")
+
+    def stop_after_first_round(seconds):
+        raise KeyboardInterrupt
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", token)
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
+    monkeypatch.setattr("kwork_pa.notify.send_telegram", broken_send)
+    monkeypatch.setattr("kwork_pa.cli.time.sleep", stop_after_first_round)
+    seen_file = tmp_path / "seen.json"
+    code = main([
+        "kwork", "--from-file", str(FIXTURES / "kwork_projects.json"), "--telegram",
+        "--watch", "60", "--seen-file", str(seen_file), "--out", str(tmp_path / "r"), "--format", "json",
+    ])
+    assert code == 130
+    err = capsys.readouterr().err
+    assert "SECRETTOKEN" not in err and "***" in err
+    # подходящий проект не доставлен — в следующий раз попробуем снова; видео-проект отсеян и просмотрен
+    assert json.loads(seen_file.read_text()) == [2712346]

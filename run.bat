@@ -12,22 +12,30 @@ set "KWORK_PA_PROG=.\run.bat"
 
 if not exist "kwork_pa\__main__.py" goto :notextracted
 
-rem Recreate .venv if it is missing, was interrupted while being created
-rem (no marker) or its Python no longer starts.
-if not exist ".venv\.created" goto :create
+if exist ".venv\.created" goto :checkvenv
+rem No marker: keep a working .venv made by hand or by an older run.bat,
+rem otherwise (missing, or creation was interrupted) create it again.
+".venv\Scripts\python.exe" -c "import sys; sys.exit(sys.version_info < (3, 10))" >nul 2>nul || goto :create
+".venv\Scripts\python.exe" -m pip --version >nul 2>nul || goto :create
+echo windows> ".venv\.created"
+goto :deps
+
+:checkvenv
+rem Marker present: recreate only if its Python no longer starts.
 ".venv\Scripts\python.exe" -c "import sys" >nul 2>nul || goto :create
 goto :deps
 
 :create
+rem Never pick the Python of .venv itself (first in PATH when .venv is activated).
 set "PY="
-py -3 -c "import sys; sys.exit(sys.version_info < (3, 10))" >nul 2>nul && set "PY=py -3"
-if not defined PY (python -c "import sys; sys.exit(sys.version_info < (3, 10))" >nul 2>nul && set "PY=python")
+py -3 -c "import os, sys; sys.exit(sys.version_info < (3, 10) or os.path.realpath(sys.prefix) == os.path.realpath('.venv'))" >nul 2>nul && set "PY=py -3"
+if not defined PY (python -c "import os, sys; sys.exit(sys.version_info < (3, 10) or os.path.realpath(sys.prefix) == os.path.realpath('.venv'))" >nul 2>nul && set "PY=python")
 if not defined PY goto :nopython
 echo [kwork-pa] Creating virtual environment .venv ...
 if exist ".venv" rmdir /s /q ".venv"
 %PY% -m venv .venv
 if errorlevel 1 goto :venvfail
-type nul > ".venv\.created"
+echo windows> ".venv\.created"
 
 :deps
 fc /b requirements.txt ".venv\.requirements.installed" >nul 2>nul

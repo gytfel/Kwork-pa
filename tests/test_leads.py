@@ -177,3 +177,11 @@ def test_dgis_client_raises_on_bad_key():
 def test_dgis_requires_key():
     with pytest.raises(DgisError):
         DgisClient("")
+
+
+def test_dgis_errors_hide_api_key():
+    session = FakeSession([requests.ConnectionError("url: /3.0/items?q=x&key=SECRET-KEY")])
+    client = DgisClient("SECRET-KEY", session=session, delay=0)
+    with pytest.raises(DgisError) as info:
+        client.search("кафе")
+    assert "SECRET-KEY" not in str(info.value)
