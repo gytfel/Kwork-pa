@@ -21,9 +21,16 @@ def answers(monkeypatch):
     return feed
 
 
+@pytest.fixture(autouse=True)
+def no_network_token_check(monkeypatch):
+    # меню проверяет токен запросом getMe — в тестах сеть не трогаем
+    monkeypatch.setattr(menu, "token_accepted", lambda token: True)
+
+
 @pytest.fixture
 def clean_env(monkeypatch, tmp_path):
-    for key in ("ANTHROPIC_API_KEY", "DGIS_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "KWORK_PA_PROG"):
+    for key in ("ANTHROPIC_API_KEY", "DGIS_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "KWORK_PA_PROG",
+                "KWORK_PA_AI"):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.chdir(tmp_path)
     return tmp_path
@@ -41,30 +48,84 @@ def run_menu():
 
 
 def test_kwork_defaults(answers, clean_env):
-    answers("1", "", "", "", "0")
+    answers("1", "", "", "", "", "0")
     assert run_menu() == [["kwork", "--pages", "3"]]
 
 
-def test_kwork_with_filters_and_claude(answers, clean_env, monkeypatch):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+def test_kwork_with_filters_and_drafts(answers, clean_env):
     answers("1", "парсер", "3000", "2", "д", "0")
-    assert run_menu() == [["kwork", "--keyword", "парсер", "--min-price", "3000", "--pages", "2", "--llm"]]
+    assert run_menu() == [["kwork", "--keyword", "парсер", "--min-price", "3000", "--pages", "2", "--drafts"]]
 
 
-def test_claude_question_skipped_without_key(answers, clean_env):
-    answers("1", "", "abc", "500", "", "0")  # «abc» — неверное число, спрашивает ещё раз
+@pytest.mark.parametrize("env,expected", [
+    ({"ANTHROPIC_API_KEY": "sk-test"}, "Claude API"),
+    ({"KWORK_PA_AI": "templates"}, "шаблоны"),
+])
+def test_drafts_question_names_the_source(answers, clean_env, monkeypatch, capsys, env, expected):
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    prompts = []
+
+    def fake_input(prompt=""):
+        prompts.append(prompt)
+        return {0: "1"}.get(len(prompts) - 1, "") if len(prompts) < 6 else "0"
+
+    monkeypatch.setattr(builtins, "input", fake_input)
+    run_menu()
+    assert any("черновики откликов" in p and expected in p for p in prompts)
+
+
+def test_invalid_number_is_asked_again(answers, clean_env):
+    answers("1", "", "abc", "500", "", "", "0")  # «abc» — неверное число, спрашивает ещё раз
     assert run_menu() == [["kwork", "--min-price", "500", "--pages", "3"]]
 
 
 def test_watch_with_telegram(answers, clean_env, monkeypatch):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "t")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "c")
-    answers("2", "", "", "", "10", "", "0")
+    answers("2", "", "", "", "", "10", "", "0")
     assert run_menu() == [["kwork", "--pages", "1", "--watch", "600", "--telegram"]]
 
 
+def test_bot_asks_for_token_and_saves_it(answers, clean_env):
+    answers("5", "123456789:AAH4kExampleTokenValue_abc-XYZ", "", "0")
+    assert run_menu() == [["bot"]]
+    assert (clean_env / ".env").read_text(encoding="utf-8") == "TELEGRAM_BOT_TOKEN=123456789:AAH4kExampleTokenValue_abc-XYZ\n"
+
+
+def test_bot_rejects_something_that_is_not_a_token(answers, clean_env):
+    answers("5", "my bot", "0")
+    assert run_menu() == []
+    assert not (clean_env / ".env").exists()
+
+
+def test_bot_token_rejected_by_telegram_is_not_saved(answers, clean_env, monkeypatch):
+    monkeypatch.setattr(menu, "token_accepted", lambda token: False)
+    answers("5", "123456789:AAH4kExampleTokenValue_abc-XYZ", "0")
+    assert run_menu() == []
+    assert not (clean_env / ".env").exists()
+
+
+@pytest.mark.parametrize("status,accepted", [(401, False), (404, False), (None, True), (502, True)])
+def test_token_accepted_only_rejects_on_unauthorized(monkeypatch, status, accepted):
+    from kwork_pa import bot
+
+    def fake_call(self, method, params=None, http_timeout=30):
+        raise bot.TelegramError("x", status)
+
+    monkeypatch.undo()  # убрать автозаглушку token_accepted
+    monkeypatch.setattr(bot.TelegramAPI, "call", fake_call)
+    assert menu.token_accepted("123:abc") is accepted
+
+
+def test_bot_with_token_starts_right_away(answers, clean_env, monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:abc")
+    answers("5", "0")
+    assert run_menu() == [["bot"]]
+
+
 def test_leads_asks_and_saves_key(answers, clean_env, monkeypatch):
-    answers("3", "my-key", "", "Казань", "кафе, барбершоп", "", "0")
+    answers("3", "my-key", "", "Казань", "кафе, барбершоп", "", "", "0")
     assert run_menu() == [[
         "leads", "--city", "Казань", "--query", "кафе", "--query", "барбершоп", "--audit",
     ]]
@@ -163,7 +224,9 @@ def test_command_line_quoting(argv, windows, expected):
     assert menu.command_line("./run.sh", argv, windows=windows) == expected
 
 
-@pytest.mark.parametrize("value", ['сказал "да"', "бюджет $200", "R&D", "a|b", "`cmd`", "50%"])
+@pytest.mark.parametrize("value", [
+    'сказал "да"', "бюджет $200", "R&D", "a|b", "`cmd`", "50%", "бот „Авито“", "см. “ТЗ”", "C:\\dir\\",
+])
 def test_no_windows_hint_for_values_shells_disagree_on(value):
     # для cmd и PowerShell нет общей записи — лучше не показывать, чем показать неверную
     assert menu.command_line(".\\run.bat", ["check", "--", value], windows=True) is None
@@ -213,3 +276,19 @@ def test_program_name(monkeypatch, env, argv0, expected):
     monkeypatch.setattr("sys.argv", [argv0])
     assert cli.program_name() == expected
     assert cli.build_parser().prog == expected
+
+
+def test_deploy_asks_address_port_and_env(answers, clean_env):
+    (clean_env / ".env").write_text("TELEGRAM_BOT_TOKEN=1:x\n", encoding="utf-8")
+    answers("6", "root@203.0.113.10", "2222", "н", "0")
+    assert run_menu() == [["deploy", "root@203.0.113.10", "--port", "2222", "--no-env"]]
+
+
+def test_deploy_defaults(answers, clean_env):
+    answers("6", "admin@vps", "", "0")
+    assert run_menu() == [["deploy", "admin@vps"]]
+
+
+def test_deploy_empty_address_goes_back(answers, clean_env):
+    answers("6", "", "0")
+    assert run_menu() == []

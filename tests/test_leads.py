@@ -185,3 +185,12 @@ def test_dgis_errors_hide_api_key():
     with pytest.raises(DgisError) as info:
         client.search("кафе")
     assert "SECRET-KEY" not in str(info.value)
+
+
+def test_dgis_errors_hide_url_encoded_api_key():
+    key = "KEY WITH SPACE"
+    session = FakeSession([requests.ConnectionError("url: /3.0/items?q=x&key=KEY+WITH+SPACE&locale=ru_RU")])
+    client = DgisClient(key, session=session, delay=0)
+    with pytest.raises(DgisError) as info:
+        client.search("кафе")
+    assert "KEY" not in str(info.value) and "key=***" in str(info.value)

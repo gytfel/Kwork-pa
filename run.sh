@@ -9,7 +9,7 @@ set -eu
 # Кавычки для подсказок меню — только если в строке есть спецсимволы.
 shquote() {
   case $1 in
-    '' | *[!A-Za-z0-9_./:=,+-]*) printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")" ;;
+    '' | *[!A-Za-z0-9_./:,+-]*) printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")" ;;
     *) printf '%s' "$1" ;;
   esac
 }
@@ -39,10 +39,36 @@ usable() {
   "$1" -c 'import os, sys; sys.exit(sys.version_info < (3, 10) or os.path.realpath(sys.prefix) == os.path.realpath(".venv"))' 2>/dev/null
 }
 
+# Ищет Python для создания .venv, не заглядывая в bin самой .venv
+# (если она активирована, её Python стоит первым в PATH, а её мы будем удалять).
+find_python() (
+  set -f
+  venv_bin=$(cd "$VENV/bin" 2>/dev/null && pwd -P) || venv_bin=
+  if [ -n "$venv_bin" ]; then
+    clean=
+    IFS=:
+    for dir in $PATH; do
+      [ "$(cd "$dir" 2>/dev/null && pwd -P)" = "$venv_bin" ] && continue
+      clean=${clean:+$clean:}$dir
+    done
+    unset IFS
+    PATH=$clean
+  fi
+  for candidate in python3 python3.14 python3.13 python3.12 python3.11 python3.10 python; do
+    found=$(command -v "$candidate" 2>/dev/null) || continue
+    if usable "$found"; then
+      printf '%s\n' "$found"
+      exit 0
+    fi
+  done
+  exit 1
+)
+
 current=$(pyver "$VENV/bin/python" || true)
 
 # .venv без метки, но рабочая (создана вручную или старой версией лаунчера) — берём как есть.
-if [ -n "$current" ] && [ ! -f "$MARKER" ] \
+# bin/activate venv пишет последним, после pip: без него создание прервали на полпути.
+if [ -n "$current" ] && [ ! -f "$MARKER" ] && [ -f "$VENV/bin/activate" ] \
   && "$VENV/bin/python" -c 'import sys; sys.exit(sys.version_info < (3, 10))' 2>/dev/null \
   && "$VENV/bin/python" -m pip --version >/dev/null 2>&1; then
   printf '%s\n' "$current" > "$MARKER"
@@ -51,14 +77,10 @@ fi
 # Пересоздаём, если .venv нет, её создание прервали (нет метки), она от Windows
 # или Python внутри сломался/обновился (версия не совпадает с меткой).
 if [ -z "$current" ] || [ ! -f "$MARKER" ] || [ "$current" != "$(cat "$MARKER")" ]; then
-  PY="${PYTHON:-}"
-  if [ -z "$PY" ]; then
-    for candidate in python3 python3.14 python3.13 python3.12 python3.11 python3.10 python; do
-      if command -v "$candidate" >/dev/null 2>&1 && usable "$candidate"; then
-        PY=$candidate
-        break
-      fi
-    done
+  if [ -n "${PYTHON:-}" ]; then
+    PY=$PYTHON
+  else
+    PY=$(find_python) || PY=
   fi
   if [ -z "$PY" ] || ! usable "$PY"; then
     echo "Нужен Python 3.10 или новее: https://www.python.org/downloads/" >&2
@@ -77,7 +99,11 @@ fi
 
 if ! cmp -s requirements.txt "$STAMP"; then
   echo "[kwork-pa] Устанавливаю зависимости ..."
-  "$VENV/bin/python" -m pip install --quiet --disable-pip-version-check -r requirements.txt
+  if ! "$VENV/bin/python" -m pip install --quiet --disable-pip-version-check -r requirements.txt; then
+    echo "Не удалось установить зависимости. Проверьте интернет и запустите ещё раз." >&2
+    echo "Если не поможет — удалите папку $VENV и запустите снова." >&2
+    exit 1
+  fi
   cp requirements.txt "$STAMP"
 fi
 

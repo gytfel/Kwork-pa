@@ -56,6 +56,7 @@ class Lead:
     services: list[str] = field(default_factory=list)
     audit: SiteAudit | None = None
     pitch: str = ""
+    pitch_is_template: bool = False
 
     def to_row(self) -> dict[str, Any]:
         c = self.company

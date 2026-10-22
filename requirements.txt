@@ -1,4 +1,4 @@
-requests>=2.31
+requests[socks]>=2.31  # socks — для прокси вида socks5:// (VPN-клиенты)
 beautifulsoup4>=4.12
-# нужен только для --llm и --pitch (проверка через Claude API)
+# нужен только для режима api (--ai api): черновики через Claude API по ключу
 anthropic>=1.14

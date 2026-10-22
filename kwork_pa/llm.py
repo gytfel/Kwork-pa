@@ -1,4 +1,4 @@
-"""Необязательная проверка через Claude API.
+"""Перепроверка заказов и черновики: Claude API, Claude Code по подписке или шаблоны.
 
 Правила из capability.py — быстрый и бесплатный первый фильтр. Этот модуль
 даёт второе мнение по уже отобранным заказам: Claude читает описание целиком,
@@ -6,27 +6,24 @@
 за человеком, и пишет черновик отклика. Для лидов из 2ГИС — черновик
 персонального письма.
 
-Нужен ключ ANTHROPIC_API_KEY (https://console.anthropic.com). Модель меняется
-переменной CLAUDE_MODEL.
+Режим выбирается в ai.py: API-ключ (ANTHROPIC_API_KEY), установленный Claude Code
+(подписка Pro/Max, ключ не нужен) или шаблоны без ИИ.
 """
 from __future__ import annotations
 
-import json
-import os
 from typing import TYPE_CHECKING, Any
 
-import anthropic
+from . import templates
+from .ai import DESCRIPTIONS, AIError, ApiBackend, TemplateBackend, extract_json, make_backend
 
 if TYPE_CHECKING:
     from .kwork import Project
     from .leads import Lead
 
-DEFAULT_MODEL = "claude-opus-5-5"
-# Модели, для которых API умеет сам повторять запрос на запасной модели при отказе.
-FALLBACK_MODELS = {"claude-opus-5-5", "claude-opus-5", "claude-fable-5-1", "claude-sonnet-5-5"}
+__all__ = ["AIError", "ClaudeJudge"]
 
 SYSTEM_PROMPT = """\
-Ты помогаешь фрилансеру отбирать заказы на бирже Kwork, которые он выполнит \
+Ты помогаешь фрилансеру отбирать заказы на бирже Kwork, которые можно выполнить \
 вместе с Claude — ИИ-ассистентом, который пишет код и тексты. Фрилансер сам \
 общается с заказчиком, запускает код и сдаёт работу; основную часть работы делает Claude.
 
@@ -46,7 +43,8 @@ Claude не справится без отдельного специалист�
 
 Черновик отклика: 3–6 предложений на русском, по делу, без воды и без обещаний, \
 которые нельзя проверить. Покажи, что понял задачу, коротко опиши подход и срок. \
-Не предлагай общение вне Kwork — это запрещено правилами биржи.\
+Не предлагай общение вне Kwork — это запрещено правилами биржи. Пиши от первого \
+лица без форм, выдающих пол автора: вместо «сделал/сделала» — «сделаю», «умею», «вижу».\
 """
 
 PROJECT_SCHEMA: dict[str, Any] = {
@@ -71,37 +69,38 @@ PITCH_SYSTEM_PROMPT = """\
 Правила: 4–6 предложений на русском, вежливо и конкретно. Начни с конкретного \
 наблюдения о компании (из найденных проблем), предложи одну-две услуги, которые \
 решают эту проблему, и закончи простым вопросом. Без давления, без выдуманных фактов, \
-цифр и гарантий. Не упоминай, что текст написан ИИ или что компанию нашли автоматически.\
+цифр и гарантий. Не упоминай, что текст написан ИИ или что компанию нашли автоматически. \
+Пиши от первого лица без форм, выдающих пол автора: вместо «заметил/заметила» — «вижу».\
 """
 
 
 class ClaudeJudge:
-    def __init__(self, model: str | None = None, client: anthropic.Anthropic | None = None) -> None:
-        self.model = model or os.environ.get("CLAUDE_MODEL") or DEFAULT_MODEL
-        self.client = client or anthropic.Anthropic()
+    """Оценка заказов и черновики в выбранном режиме.
 
-    def _call(self, system: str, user: str, schema: dict[str, Any] | None, max_tokens: int) -> str | None:
-        output_config: dict[str, Any] = {"effort": "low"}
-        if schema:
-            output_config["format"] = {"type": "json_schema", "schema": schema}
-        extra: dict[str, Any] = {}
-        if self.model in FALLBACK_MODELS:
-            # при отказе модели запрос автоматически повторится на рекомендуемой запасной модели
-            extra = {"betas": ["server-side-fallback-2026-07-01"], "fallbacks": "default"}
-        response = self.client.beta.messages.create(
-            model=self.model,
-            max_tokens=max_tokens,
-            system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
-            output_config=output_config,
-            messages=[{"role": "user", "content": user}],
-            **extra,
-        )
-        if response.stop_reason == "refusal":
-            return None
-        texts = [block.text for block in response.content if block.type == "text"]
-        return texts[-1] if texts else None
+    ClaudeJudge(client=...) — режим API с готовым клиентом (так удобно в тестах);
+    ClaudeJudge(mode="claude-code") — по подписке; ClaudeJudge() — режим «auto».
+    """
+
+    def __init__(self, model: str | None = None, client: Any = None, mode: str | None = None, backend: Any = None) -> None:
+        if backend is None:
+            backend = ApiBackend(model=model, client=client) if client is not None else make_backend(mode)
+        self.backend = backend
+
+    @property
+    def mode(self) -> str:
+        return self.backend.name
+
+    @property
+    def description(self) -> str:
+        return DESCRIPTIONS[self.mode]
+
+    @property
+    def uses_ai(self) -> bool:
+        return not isinstance(self.backend, TemplateBackend)
 
     def assess_project(self, project: Project) -> dict[str, Any] | None:
+        if not self.uses_ai:
+            return templates.project_assessment(project)
         price = f"{project.price} ₽" if project.price else "не указан"
         if project.price_max:
             price += f" (допустимый до {project.price_max} ₽)"
@@ -110,15 +109,17 @@ class ClaudeJudge:
             f"Откликов уже: {project.offers if project.offers is not None else 'неизвестно'}\n\n"
             f"Описание:\n{project.description}"
         )
-        text = self._call(SYSTEM_PROMPT, user, PROJECT_SCHEMA, max_tokens=8000)
-        if text is None:
+        result = self.backend.complete(SYSTEM_PROMPT, user, PROJECT_SCHEMA, 8000)
+        if isinstance(result, str):
+            result = extract_json(result)
+        if not isinstance(result, dict) or "draft_reply" not in result:
             return None
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            return None
+        result["source"] = self.mode
+        return result
 
     def pitch_for_lead(self, lead: Lead) -> str:
+        if not self.uses_ai:
+            return templates.lead_pitch(lead)
         c = lead.company
         user = (
             f"Компания: {c.name}\nСфера: {', '.join(c.rubrics) or 'не указана'}\n"
@@ -128,4 +129,5 @@ class ClaudeJudge:
             f"Найденные проблемы: {'; '.join(lead.problems) or 'нет'}\n"
             f"Что можно предложить: {'; '.join(lead.services) or 'сайт'}"
         )
-        return (self._call(PITCH_SYSTEM_PROMPT, user, None, max_tokens=4000) or "").strip()
+        result = self.backend.complete(PITCH_SYSTEM_PROMPT, user, None, 4000)
+        return result.strip() if isinstance(result, str) else ""
